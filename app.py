@@ -1,13 +1,13 @@
 # app.py
 # Proyecto Titán – Analizador de Perfiles
-# Versión: 8.1 (Corregido - Inicialización de Fuentes)
+# Versión: 8.2 (Mejoras de Robustez y UX)
 
 import os
 import sys
 import shutil
 import traceback
 import sqlite3
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 # --- UI / System ---
 import customtkinter as ctk
@@ -78,8 +78,8 @@ class Tooltip:
         self.fonts = fonts
         self._id = None
         self._tip = None
-        widget.bind("<Enter>", self._schedule)
-        widget.bind("<Leave>", self._unschedule)
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._unschedule, add="+")
 
     def _schedule(self, _):
         self._id = self.widget.after(self.delay, self._show)
@@ -204,7 +204,8 @@ class Header(ctk.CTkFrame):
 class StatusBar(ctk.CTkFrame):
     def __init__(self, master, fonts: Dict):
         super().__init__(master, corner_radius=0, fg_color=Theme.SURFACE)
-        self.label_left = ctk.CTkLabel(self, text="Listo.", font=fonts["BODY"], text_color=Theme.MUTED)
+        self.default_text = "Listo."
+        self.label_left = ctk.CTkLabel(self, text=self.default_text, font=fonts["BODY"], text_color=Theme.MUTED)
         self.label_right = ctk.CTkLabel(self, text="", font=fonts["BODY"], text_color=Theme.MUTED)
         self.label_left.pack(side="left", padx=12, pady=6)
         self.label_right.pack(side="right", padx=12, pady=6)
@@ -212,38 +213,49 @@ class StatusBar(ctk.CTkFrame):
     def set(self, left: str = None, right: str = None):
         if left is not None: self.label_left.configure(text=left)
         if right is not None: self.label_right.configure(text=right)
-
+    
+    def reset(self):
+        self.label_left.configure(text=self.default_text)
 
 class ControlCard(ctk.CTkFrame):
-    def __init__(self, master, commands: Dict[str, callable], icons: Dict[str, ctk.CTkImage], fonts: Dict, graficos: list):
+    def __init__(self, master, commands: Dict[str, callable], icons: Dict[str, ctk.CTkImage], fonts: Dict, graficos: list, status_bar: StatusBar):
         super().__init__(master, corner_radius=12, fg_color=Theme.CARD)
         self.commands = commands
         self.fonts = fonts
+        self.status_bar = status_bar
         self._build(icons, graficos)
 
+    def _bind_status_events(self, widget, text: str):
+        """ Asocia eventos de hover para mostrar mensajes en la barra de estado. """
+        widget.bind("<Enter>", lambda e: self.status_bar.set(left=text), add="+")
+        widget.bind("<Leave>", lambda e: self.status_bar.reset(), add="+")
+
     def _build(self, icons, graficos):
-        # Título
         ctk.CTkLabel(self, text="Acciones", font=self.fonts["H2"]).pack(anchor="w", padx=14, pady=(14, 0))
         ctk.CTkLabel(self, text="Procesá, compará y exportá.", font=self.fonts["BODY"], text_color=Theme.MUTED).pack(anchor="w", padx=14, pady=(0, 10))
 
-        # Botones Principales
         self.boton_procesar = ctk.CTkButton(self, text="Procesar Reporte", image=icons["process"], compound="left", font=self.fonts["H3"], height=44, corner_radius=10, fg_color=Theme.SUCCESS, hover_color=Theme.SUCCESS_HOVER, command=self.commands["process"])
         self.boton_comparar = ctk.CTkButton(self, text="Generar Evolución", image=icons["compare"], compound="left", font=self.fonts["H3"], height=44, corner_radius=10, fg_color=Theme.ACCENT, hover_color=Theme.ACCENT_HOVER, command=self.commands["compare"])
         self.boton_procesar.pack(fill="x", padx=12, pady=(8, 6))
         self.boton_comparar.pack(fill="x", padx=12, pady=(0, 10))
         Tooltip(self.boton_procesar, "Abrir y analizar un reporte PDF (Ctrl+O)", fonts=self.fonts)
+        self._bind_status_events(self.boton_procesar, "Analiza un único reporte en formato PDF.")
+
         Tooltip(self.boton_comparar, "Comparar dos reportes PDF (Ctrl+Shift+E)", fonts=self.fonts)
+        self._bind_status_events(self.boton_comparar, "Compara dos reportes para medir la evolución del operario.")
 
         ctk.CTkFrame(self, height=1, fg_color=Theme.DIVIDER).pack(fill="x", padx=12, pady=12)
 
-        # Herramientas
         ctk.CTkLabel(self, text="Herramientas de análisis", font=self.fonts["H3"], text_color=Theme.MUTED).pack(anchor="w", padx=14)
         self.combo_graficos = ctk.CTkComboBox(self, values=graficos, state="disabled", command=self.commands["show_graph"], height=36, font=self.fonts["BODY"])
         self.boton_exportar = ctk.CTkButton(self, text="Exportar a PDF", image=icons["export"], compound="left", font=self.fonts["BODY"], height=36, corner_radius=10, fg_color=Theme.SURFACE, hover_color=Theme.DIVIDER, state="disabled", command=self.commands["export"])
         self.combo_graficos.pack(fill="x", padx=12, pady=(6, 6))
         self.boton_exportar.pack(fill="x", padx=12, pady=(0, 12))
         Tooltip(self.combo_graficos, "Seleccioná la variable a visualizar", fonts=self.fonts)
+        self._bind_status_events(self.combo_graficos, "Cambia el gráfico de telemetría que se está visualizando.")
+
         Tooltip(self.boton_exportar, "Guardar reporte formateado (Ctrl+S)", fonts=self.fonts)
+        self._bind_status_events(self.boton_exportar, "Guarda el análisis del reporte actual en un nuevo archivo PDF.")
 
     def set_button_state(self, is_enabled: bool):
         state = "normal" if is_enabled else "disabled"
@@ -272,18 +284,16 @@ class ResultsArea(ctk.CTkFrame):
         tab_resumen = self.tabs.add("Resumen")
         tab_grafico = self.tabs.add("Gráfico")
 
-        # Configurar Tab de Resumen
-        tab_resumen.grid_rowconfigure(0, weight=1)
-        tab_resumen.grid_columnconfigure(0, weight=1)
         self.area_resultados = ctk.CTkTextbox(tab_resumen, font=self.fonts["MONO"], corner_radius=8, wrap="word", border_width=0, fg_color=Theme.BG, text_color=Theme.TEXT)
         self.area_resultados.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
         self.area_resultados.insert("0.0", "Sistema listo para procesar reportes...")
+        tab_resumen.grid_rowconfigure(0, weight=1)
+        tab_resumen.grid_columnconfigure(0, weight=1)
 
-        # Configurar Tab de Gráfico
-        tab_grafico.grid_rowconfigure(0, weight=1)
-        tab_grafico.grid_columnconfigure(0, weight=1)
         self.grafico_frame = ctk.CTkFrame(tab_grafico, corner_radius=8, fg_color=Theme.BG)
         self.grafico_frame.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+        tab_grafico.grid_rowconfigure(0, weight=1)
+        tab_grafico.grid_columnconfigure(0, weight=1)
 
     def clear_panels(self, clear_graph=True):
         self.area_resultados.delete("1.0", "end")
@@ -308,7 +318,6 @@ class TitanApp:
         Theme.apply_theme("dark")
         ctk.set_default_color_theme("dark-blue")
         self.root = ctk.CTk()
-        # **LA CREACIÓN DE FUENTES SE MUEVE AQUÍ, DESPUÉS DE CREAR LA VENTANA**
         self.fonts = {
             "H1": ctk.CTkFont(size=22, weight="bold"),
             "H2": ctk.CTkFont(size=16, weight="bold"),
@@ -316,7 +325,7 @@ class TitanApp:
             "BODY": ctk.CTkFont(size=13),
             "MONO": ctk.CTkFont(family="Consolas", size=13)
         }
-        self.root.title("Proyecto Titán v8.1 – Visualizador de Telemetría")
+        self.root.title("Proyecto Titán v8.2 – Robusto y Mejorado")
         self.root.geometry("1200x800")
         self.root.minsize(980, 720)
         self.root.configure(fg_color=Theme.BG)
@@ -336,6 +345,9 @@ class TitanApp:
         menubar.add_cascade(label="Archivo", menu=archivo)
 
         vista = tk.Menu(menubar, tearoff=0)
+        vista.add_command(label="Tema Oscuro", command=lambda: Theme.apply_theme("dark"))
+        vista.add_command(label="Tema Claro", command=lambda: Theme.apply_theme("light"))
+        vista.add_separator()
         for scale in [80, 90, 100, 110, 120, 130, 150]:
             vista.add_command(label=f"Escala UI {scale}%", command=lambda s=scale: ctk.set_widget_scaling(s/100.0))
         menubar.add_cascade(label="Vista", menu=vista)
@@ -364,17 +376,17 @@ class TitanApp:
         self.header = Header(self.root, self.fonts)
         self.header.grid(row=0, column=0, columnspan=2, sticky="ew", padx=12, pady=(12, 6))
 
+        self.status = StatusBar(self.root, self.fonts)
+        self.status.grid(row=2, column=0, columnspan=2, sticky="ew")
+        
         icons = {"process": IconFactory.create_icon("process"), "compare": IconFactory.create_icon("compare"), "export": IconFactory.create_icon("export")}
         commands = {"process": self.procesar_reporte_individual, "compare": self.generar_reporte_evolucion, "export": self.exportar_a_pdf, "show_graph": self.mostrar_grafico_seleccionado}
         
-        self.sidebar = ControlCard(self.root, commands, icons, self.fonts, self.GRAFICOS_DISPONIBLES)
+        self.sidebar = ControlCard(self.root, commands, icons, self.fonts, self.GRAFICOS_DISPONIBLES, self.status)
         self.sidebar.grid(row=1, column=0, sticky="nsew", padx=(12, 6), pady=(6, 6))
         
         self.results = ResultsArea(self.root, self.fonts)
         self.results.grid(row=1, column=1, sticky="nsew", padx=(6, 12), pady=(6, 6))
-        
-        self.status = StatusBar(self.root, self.fonts)
-        self.status.grid(row=2, column=0, columnspan=2, sticky="ew")
 
     def _bind_shortcuts(self):
         self.root.bind("<Control-o>", lambda _: self.procesar_reporte_individual())
@@ -411,8 +423,7 @@ class TitanApp:
 
             self.session_id_actual = self._procesar_y_obtener_id(pdf_path)
             if not self.session_id_actual:
-                self._error_ui("Error de Procesamiento", "No se pudo procesar el archivo PDF.")
-                return
+                return 
 
             with get_db_connection(self.DB_PATH) as conn:
                 conn.row_factory = sqlite3.Row
@@ -427,7 +438,7 @@ class TitanApp:
 
             self.sidebar.combo_graficos.set("Steering")
             self.mostrar_grafico_seleccionado()
-            self.results.tabs.set("Resumen") # Mostrar resumen primero
+            self.results.tabs.set("Resumen") 
 
             self.toast.show("Reporte procesado con éxito", kind="success")
             self.status.set(left="Listo.", right=f"Sesión #{self.session_id_actual}")
@@ -513,10 +524,12 @@ class TitanApp:
             if not parsed_data: return None
 
             model_path = os.path.join(project_root, 'models', 'modelo_clasificador.joblib')
-            if not os.path.exists(model_path):
-                raise FileNotFoundError(f"No se encontró el modelo en: {model_path}")
+            try:
+                modelo = joblib.load(model_path)
+            except FileNotFoundError:
+                self._error_ui("Error Crítico", f"No se encontró el archivo del modelo de Machine Learning en:\n{model_path}\n\nAsegurate de que el archivo 'modelo_clasificador.joblib' esté en la carpeta 'models'.")
+                return None
 
-            modelo = joblib.load(model_path)
             df_pred = self._preparar_datos_para_prediccion(parsed_data, getattr(modelo, "feature_names_in_", []))
             perfil = modelo.predict(df_pred)[0]
 
@@ -533,14 +546,24 @@ class TitanApp:
             shutil.copy2(pdf_path, os.path.join(self.EXPORTS_DIR, file_name))
             return new_id
 
-    def _preparar_datos_para_prediccion(self, parsed_data, feature_names):
+    def _preparar_datos_para_prediccion(self, parsed_data, feature_names: List[str]):
         data = {'puntaje_final': parsed_data['session_data']['puntaje_final'], 'duracion_segundos': parsed_data['session_data']['duracion_segundos']}
         for event in parsed_data['summary_events']:
             ev_type = event['type'].replace(' ', '_')
             data[f"conteo_eventos_{ev_type}"] = float(event.get('total_events', 0))
             data[f"penalizaciones_{ev_type}"] = float(event.get('penalties', 0))
         
-        return pd.DataFrame([data], columns=feature_names if feature_names else None).fillna(0)
+        # Estrategia segura: crear un DF con todas las columnas esperadas y luego rellenar.
+        if not feature_names:
+            return pd.DataFrame([data]).fillna(0)
+            
+        df = pd.DataFrame(columns=feature_names)
+        df.loc[0] = 0 # Inicializar una fila con ceros
+        for key, value in data.items():
+            if key in df.columns:
+                df.at[0, key] = value
+        
+        return df.fillna(0)
 
     def _error_ui(self, titulo, detalle):
         self.results.clear_panels()
@@ -550,7 +573,9 @@ class TitanApp:
 
     def cerrar_aplicacion(self, *_):
         if messagebox.askokcancel("Salir", "¿Cerrar Proyecto Titán?"):
-            self.root.quit(); self.root.destroy(); sys.exit(0)
+            self.root.quit()
+            self.root.destroy()
+            sys.exit(0)
 
     def ejecutar(self):
         self.root.mainloop()
