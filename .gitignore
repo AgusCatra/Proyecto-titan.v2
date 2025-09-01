@@ -1,0 +1,16 @@
+Fragmento de código
+
+# Entorno Virtual
+.venv/
+venv/
+env/
+
+# Archivos de caché de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Configuración del editor
+.vscode/
+.idea/
