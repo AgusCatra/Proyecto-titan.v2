@@ -554,8 +554,11 @@ class TitanApp:
             data[f"penalizaciones_{ev_type}"] = float(event.get('penalties', 0))
         
         # Estrategia segura: crear un DF con todas las columnas esperadas y luego rellenar.
-        if not feature_names:
-            return pd.DataFrame([data]).fillna(0)
+        if feature_names is None or (hasattr(feature_names, "__len__") and len(feature_names) == 0):
+         return pd.DataFrame([data]).fillna(0)
+        # Convertir a lista si viene como ndarray (NumPy)
+        if not isinstance(feature_names, list):
+            feature_names = list(feature_names)
             
         df = pd.DataFrame(columns=feature_names)
         df.loc[0] = 0 # Inicializar una fila con ceros
