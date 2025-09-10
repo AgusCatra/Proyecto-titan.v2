@@ -33,36 +33,61 @@ def get_db_connection(db_path: str):
             conn.close()
 
 # --- FUNCIÓN CORREGIDA Y ACTUALIZADA ---
-def get_telemetry_for_graph(id_sesion: int, graph_name: str) -> Optional[Tuple[List[float], List[float]]]:
+def get_telemetry_for_graph(
+    id_sesion: int,
+    graph_name: str,
+    conn: sqlite3.Connection = None,
+    db_path: str = None
+) -> Optional[List[Tuple[float, float]]]:
     """
-    Obtiene los datos de una serie de telemetría específica desde la BD.
-    
-    Args:
-        id_sesion: El ID de la sesión a consultar.
-        graph_name: El nombre del gráfico (ej: "Steering").
-        
-    Returns:
-        Una tupla con dos listas (timestamps, valores), o None si no se encuentran datos.
+    Obtiene la serie (t, v) para un gráfico de telemetría.
+    Devuelve lista de tuplas [(timestamp, valor), ...] o None si no hay datos.
     """
+
+    close_conn = False
     try:
-        # Usamos la ruta global a la BD
-        with create_connection(DB_PATH) as conn:
-            # CORRECCIÓN 1: Usar los nombres de columna correctos ('timestamps', 'valores')
-            query = "SELECT timestamps, valores FROM Telemetria WHERE id_sesion_fk = ? AND nombre_grafico = ?"
-            result = conn.execute(query, (id_sesion, graph_name)).fetchone()
-            
-            if not result:
-                return None
-            
-            # CORRECIÓN 2: Procesar los strings en Python para convertirlos en listas
-            timestamps = [float(t) for t in result['timestamps'].split(',')]
-            valores = [float(v) for v in result['valores'].split(',')]
-            
-            return (timestamps, valores)
-            
-    except (sqlite3.Error, ValueError) as e:
-        print(f"Error al obtener datos de telemetría para '{graph_name}': {e}")
+        if conn is None:
+            if db_path is None:
+                base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                db_path = os.path.join(base_dir, "database", "titan.db")
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            close_conn = True
+
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT timestamps, valores FROM Telemetria WHERE id_sesion_fk = ? AND nombre_grafico = ?",
+            (id_sesion, graph_name)
+        )
+        rows = cur.fetchall()
+        if not rows:
+            return None
+
+        all_points: List[Tuple[float, float]] = []
+
+        for row in rows:
+            ts_str = row["timestamps"]
+            val_str = row["valores"]
+
+            if not ts_str or not val_str:
+                continue
+
+            # Parsear listas separadas por comas
+            ts_list = [float(x) for x in str(ts_str).split(",") if x.strip()]
+            val_list = [float(x) for x in str(val_str).split(",") if x.strip()]
+
+            # Asegurar que no se desalineen
+            n = min(len(ts_list), len(val_list))
+            all_points.extend([(ts_list[i], val_list[i]) for i in range(n)])
+
+        return all_points if all_points else None
+
+    except sqlite3.Error as e:
+        print(f"[get_telemetry_for_graph] Error DB: {e}")
         return None
+    finally:
+        if close_conn and conn:
+            conn.close()
 
 # (Aquí debe estar el resto del código de db_manager.py, como insert_session, etc.)
 def get_session_id_by_filename(connection: sqlite3.Connection, filename: str) -> Optional[int]:
