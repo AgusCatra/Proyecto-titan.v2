@@ -7,6 +7,7 @@ import tempfile
 import sqlite3
 import io
 from typing import Optional, Dict, Any, List, Tuple
+from core.analizador_eventos import generar_feedback, extraer_eventos_crudos
 
 # --- Rutas del proyecto ---
 project_root = os.path.dirname(os.path.abspath(__file__))
@@ -170,6 +171,11 @@ if individual_file:
             for g in GRAFICOS_DISPONIBLES:
                 datos_grafico = get_telemetry_for_graph(session_id, g)
                 _plot_telemetry_chart(datos_grafico, g)
+        # --- Devolución inteligente (basada en eventos crudos) ---
+        eventos_crudos = extraer_eventos_crudos(tmp_path)
+        if eventos_crudos:
+            st.subheader("🤖 Devolución inteligente")
+            st.markdown(generar_feedback(eventos_crudos))
     finally:
         os.remove(tmp_path)
 
