@@ -1,19 +1,16 @@
-# test_extractor.py
 from core.telemetry_extractor import extraer_telemetria_visual
 
-# Ruta fija al PDF de prueba
-ruta = "/home/agustin/Documentos/backup proyecto/backupo GIT?/Proyecto-titan/data/exports/report test.pdf"
+# Ruta relativa dentro del repo
+PDF_PATH = "data/exports/report test.pdf"
+DURACION = 480
 
-# Duración total en segundos (cambia el número si conocés el valor real del reporte)
-duracion = 300  
-
-print(f"Analizando PDF: {ruta}")
-data = extraer_telemetria_visual(ruta, duracion)
+print(f"Analizando PDF: {PDF_PATH}")
+data = extraer_telemetria_visual(PDF_PATH, DURACION)
 
 print("\nResultados de extracción:")
-for grafico, serie in data.items():
-    if serie is None:
-        print(f" - {grafico}: no se pudo extraer datos")
+for k, v in data.items():
+    if v is None:
+        print(f" - {k}: no se pudo extraer datos")
     else:
-        print(f" - {grafico}: {len(serie)} puntos extraídos")
-        print(f"   Ejemplo: {serie[:5]}")
+        print(f" - {k}: {len(v)} puntos extraídos")
+        print(f"   Ejemplo: {v[:5]}")

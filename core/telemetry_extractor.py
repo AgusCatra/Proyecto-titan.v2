@@ -1,4 +1,4 @@
-## core/telemetry_extractor.py
+# core/telemetry_extractor.py
 # Extracción automática de gráficos de telemetría desde reportes PDF
 import os
 from typing import Dict, List, Optional, Tuple
@@ -7,13 +7,19 @@ import cv2
 import numpy as np
 import pypdfium2 as pdfium
 import pytesseract
+import platform
 
+# Configuración de Tesseract multiplataforma
+if platform.system() == "Windows":
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+else:
+    pytesseract.pytesseract.tesseract_cmd = "tesseract"
 
 # Rangos reales por nombre oficial
 Y_RANGES = {
     "Steering": (-14.0, 14.0),
     "Brake Pad": (0.0, 10.0),
-    "Acceleration Pad": (0.0, 10.0),       # ajusta si es 0–2.5 en tu simulador
+    "Acceleration Pad": (0.0, 10.0),  # ajusta si es 0–2.5 en tu simulador
     "Speed In Km/h": (0.0, 2.5),
     "Fork Height In Mtrs": (0.0, 5.0),
     "Tilt Angle In Deg": (0.0, 8.0),
@@ -21,7 +27,6 @@ Y_RANGES = {
 
 PURPLE_LOWER = np.array([110, 30, 40], dtype=np.uint8)
 PURPLE_UPPER = np.array([170, 255, 255], dtype=np.uint8)
-
 
 def _scale(v: float, src: Tuple[float, float], dst: Tuple[float, float]) -> float:
     (a0, a1), (b0, b1) = src, dst
