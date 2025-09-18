@@ -7,7 +7,6 @@ import tempfile
 import sqlite3
 import io
 from typing import Optional, Dict, Any, List, Tuple
-from core.analizador_eventos import generar_feedback, extraer_eventos_crudos
 
 # --- Rutas del proyecto ---
 project_root = os.path.dirname(os.path.abspath(__file__))
@@ -15,8 +14,10 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 # --- Importaciones ---
+from core.analizador_eventos import generar_feedback, extraer_eventos_crudos
 from core.pdf_parser import parse_pdf_report
 from core.telemetry_extractor import extraer_telemetria_visual
+from core.graph_mapper import map_graphs   # NUEVO
 from core.db_manager import (
     get_db_connection, insert_session, insert_summary_events,
     get_session_id_by_filename, insert_telemetry_data, get_telemetry_for_graph
@@ -51,7 +52,7 @@ RUTAS_DE_APRENDIZAJE = {
 # =============================================================================
 
 def _preparar_datos_para_prediccion(parsed_data, feature_names: List[str]):
-    """Convierte datos parseados en DataFrame compatible con el modelo."""
+    """Convierte datos parseados en DataFrame compatible con el modelo ML."""
     data = {
         'puntaje_final': parsed_data['session_data'].get('puntaje_final', 0.0),
         'duracion_segundos': parsed_data['session_data'].get('duracion_segundos', 0)
@@ -78,7 +79,7 @@ def _procesar_y_obtener_id(pdf_path: str) -> Optional[int]:
             st.error("❌ No se pudieron extraer datos del PDF.")
             return None
 
-        # Cargar modelo
+        # Cargar modelo ML
         try:
             modelo = joblib.load(MODELS_PATH)
         except FileNotFoundError:
@@ -97,8 +98,9 @@ def _procesar_y_obtener_id(pdf_path: str) -> Optional[int]:
 
         insert_summary_events(conn, new_id, parsed_data['summary_events'])
 
-        # Telemetría
-        telemetria = extraer_telemetria_visual(pdf_path, parsed_data['session_data']['duracion_segundos'])
+        # Telemetría → extraer + mapear nombres correctos
+        telemetria_raw = extraer_telemetria_visual(pdf_path, parsed_data['session_data']['duracion_segundos'])
+        telemetria = map_graphs(telemetria_raw)
         for nombre, datos in telemetria.items():
             if datos:
                 insert_telemetry_data(conn, new_id, nombre, datos)
@@ -108,6 +110,7 @@ def _procesar_y_obtener_id(pdf_path: str) -> Optional[int]:
         return new_id
 
 def _plot_telemetry_chart(datos: List[Tuple], titulo: str):
+    """Dibuja un gráfico bonito en Streamlit."""
     if not datos:
         st.warning(f"No hay datos para '{titulo}'.")
         return
@@ -133,7 +136,7 @@ def _plot_telemetry_chart(datos: List[Tuple], titulo: str):
 # =============================================================================
 
 st.set_page_config(page_title="Proyecto Titán v2.0", page_icon="🤖", layout="wide")
-st.title("Proyecto Titán v2.0 - Interfaz Web")
+st.title("🚀 Proyecto Titán v2.0 - Interfaz Web")
 
 with st.sidebar:
     st.header("Menú")
@@ -171,6 +174,7 @@ if individual_file:
             for g in GRAFICOS_DISPONIBLES:
                 datos_grafico = get_telemetry_for_graph(session_id, g)
                 _plot_telemetry_chart(datos_grafico, g)
+
         # --- Devolución inteligente (basada en eventos crudos) ---
         eventos_crudos = extraer_eventos_crudos(tmp_path)
         if eventos_crudos:

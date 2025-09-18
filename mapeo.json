@@ -1,0 +1,26 @@
+[
+  {
+    "graph": "Graph_5_1",
+    "suggested_name": "Steering"
+  },
+  {
+    "graph": "Graph_5_2",
+    "suggested_name": "Brake Pad"
+  },
+  {
+    "graph": "Graph_6_1",
+    "suggested_name": "Acceleration Pad"
+  },
+  {
+    "graph": "Graph_6_2",
+    "suggested_name": "Speed In Km/h"
+  },
+  {
+    "graph": "Graph_7_1",
+    "suggested_name": "Fork Height In Mtrs"
+  },
+  {
+    "graph": "Graph_7_2",
+    "suggested_name": "Tilt Angle In Deg"
+  }
+]
