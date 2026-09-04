@@ -1,0 +1,1 @@
+Python core module that extracts telemetry from PDF reports, analyzes operator behavior, generates personalized training paths, and produces PDF reports for individual and evolution sessions.

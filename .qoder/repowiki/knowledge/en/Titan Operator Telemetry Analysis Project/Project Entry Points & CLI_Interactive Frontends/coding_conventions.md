@@ -1,0 +1,6 @@
+- Each script derives its project root via `project_root = os.path.dirname(os.path.abspath(__file__))` and resolves `database/`, `models/`, `data/exports/` relative to it, so scripts remain relocatable.
+- Database interactions go through `core.db_manager.get_db_connection(...)` used as a context manager, with explicit `BEGIN`/`commit`/`rollback` around multi-step inserts of session, events, and telemetry.
+- PDF ingestion follows a fixed sequence: parse with `parse_pdf_report`, optionally classify via `joblib.load(MODELS_PATH).predict(...)`, persist session + summary_events + telemetry, then copy the source PDF into `data/exports/`.
+- Feature preparation for the ML model builds a DataFrame from `puntaje_final`, `duracion_segundos`, and one `conteo_eventos_<Type>` / `penalizaciones_<Type>` column per event type, filling missing features with zeros before calling `modelo.predict`.
+- User-facing feedback uses consistent visual helpers: `Toast`/`status_bar.set` in the desktop app and `st.success`/`st.error`/`st.warning` in Streamlit, always paired with a loading overlay or spinner during long operations.
+- Error handling wraps each user action in try/except blocks that surface tracebacks to the UI while leaving the application loop running rather than crashing.

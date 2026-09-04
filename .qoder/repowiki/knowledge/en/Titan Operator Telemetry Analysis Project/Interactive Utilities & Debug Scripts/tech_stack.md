@@ -1,0 +1,1 @@
+OpenCV (cv2) for interactive image inspection; PyMuPDF (`fitz`) and pdfplumber as alternative PDF text extractors; matplotlib for plotting extracted series; sqlite3 with an external `schema.sql` DDL file for database bootstrapping.

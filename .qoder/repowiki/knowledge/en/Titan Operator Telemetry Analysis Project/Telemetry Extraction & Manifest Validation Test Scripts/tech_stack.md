@@ -1,0 +1,1 @@
+Python with pandas, sqlite3, OpenCV (`cv2`), NumPy, and Matplotlib; relies on a project-local `core` package exposing `telemetry_extractor` and `graph_mapper`.

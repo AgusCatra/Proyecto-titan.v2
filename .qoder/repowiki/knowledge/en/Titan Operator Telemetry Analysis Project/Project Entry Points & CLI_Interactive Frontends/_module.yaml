@@ -1,0 +1,13 @@
+schema_version: 1
+module_path: entry_scripts
+title: Project Entry Points & CLI/Interactive Frontends
+scope:
+    - main.py
+    - app.py
+    - streamlit_app.py
+    - analisis_mvp.py
+    - entrenador_ia.py
+source_files: []
+depends_on: []
+related_to:
+    - path: core

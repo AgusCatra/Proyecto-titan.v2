@@ -1,0 +1,5 @@
+- Each utility is a standalone script invoked via `if __name__ == '__main__':` with no package-level imports between files.
+- Interactive OpenCV tools follow the same pattern: read image with `cv2.imread`, create a named window, register a `setMouseCallback`, display with `imshow`, and block on `waitKey(0)` before `destroyAllWindows`.
+- PDF event extraction scripts parse time-stamped lines with a regex matching `HH:MM:SS <metric> <value>` and group results into a `defaultdict(list)` keyed by metric name.
+- Extracted series are sorted by timestamp before being written as CSV (`t,v` header) and plotted with matplotlib using consistent styling (markers, grid, tight layout).
+- File paths are constructed with `pathlib.Path` and directories are created lazily with `mkdir(exist_ok=True)` where needed.

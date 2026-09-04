@@ -1,0 +1,1 @@
+Standalone diagnostic and validation scripts that exercise the telemetry extraction pipeline against sample PDFs, verify manifest/database schema, and plot/debug extracted signal series.

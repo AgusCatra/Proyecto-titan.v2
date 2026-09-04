@@ -1,0 +1,3 @@
+- Operator profiles and per-PDF metadata are read from the root `manifest.csv` rather than embedded in code, keeping dataset definitions external to logic.
+- Signal/graph naming is centralized in `mapeo.json` so both analysis and visualization code resolve display names from a single mapping.
+- Each child package exposes its functionality through standalone scripts invoked from the repository root instead of as importable libraries.

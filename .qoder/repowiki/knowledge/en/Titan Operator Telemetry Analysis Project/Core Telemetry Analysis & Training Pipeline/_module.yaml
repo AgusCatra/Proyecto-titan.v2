@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: core
+title: Core Telemetry Analysis & Training Pipeline
+scope:
+    - core/
+source_files: []
+depends_on: []
+related_to:
+    - path: entry_scripts
+    - path: tests
+    - path: utilities

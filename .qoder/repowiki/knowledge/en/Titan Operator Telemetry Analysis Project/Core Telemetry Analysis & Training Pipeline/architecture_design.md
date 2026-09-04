@@ -1,0 +1,9 @@
+The module is organized as a flat package of cooperating components with a clear data-flow pipeline:
+- **Ingestion**: `telemetry_extractor.py` uses OpenCV + PyPDFium2 + Tesseract to detect chart regions in PDFs by purple-line color masking, OCR titles, and curve extraction; `telemetry_parser.py` provides an alternative config-driven extractor via pdfplumber with per-graph calibration tables (`GRAPH_CONFIGS`).
+- **Mapping**: `graph_mapper.py` normalizes extracted graph names against `mapeo.json` into canonical keys.
+- **Persistence**: `db_manager.py` centralizes SQLite access to `database/titan.db` (tables `Sesiones`, `Telemetria`, `ResumenEventos`) via a `get_db_connection` context manager and helper functions for insert/query.
+- **Analysis**: `behavior_analyzer.py` defines the `BehaviorProfile` enum and `BehaviorAnalyzer` class that classifies operators (EFICIENTE/APURADO/SIN_NOCION_ESPACIO/INEFICIENTE/NOVATO) using rule-based thresholds on session metrics and summary events; standalone functions compute braking, steering, acceleration, fork height, tilt, and speed metrics from stored telemetry.
+- **Orchestration**: `training_manager.py` composes `BehaviorAnalyzer` + `TrainingPath` to evaluate an operator's latest session and produce a recommended learning path.
+- **Reporting**: `report_generator.py` subclasses FPDF to render individual-session and evolution comparison PDFs with headers/footers and comparative tables.
+- **Auxiliary**: `plotter.py`, `analizador_eventos.py`, `reporter.py` provide plotting and event-analysis helpers consumed by higher-level scripts.
+Dependency direction is one-way: ingestion → mapping → persistence → analysis → orchestration → reporting. Cross-file imports are limited to `db_manager`, `behavior_analyzer`, and `training_path`.

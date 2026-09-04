@@ -1,0 +1,1 @@
+SQLite via `sqlite3` for session/telemetry storage; `pdfplumber` and `pypdfium2` for PDF parsing; OpenCV + NumPy for image processing and curve extraction; Tesseract (`pytesseract`) for OCR chart titles; `fpdf` for PDF report generation; `pandas`/`numpy` for telemetry metric computation.

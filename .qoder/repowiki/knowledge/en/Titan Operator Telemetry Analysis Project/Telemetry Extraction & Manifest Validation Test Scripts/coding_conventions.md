@@ -1,0 +1,4 @@
+- Scripts pin a single sample PDF path and duration as module-level constants (`PDF_PATH`, `DURACION`) and call `extraer_telemetria_visual` immediately on import or in `__main__`.
+- Extracted results are iterated as key-value pairs where values are either `None` or lists of `(time, value)` tuples, and callers branch on truthiness to print summaries or plot series.
+- Debug outputs are written to dedicated directories created with `os.makedirs(..., exist_ok=True)` (e.g. `debug_outputs/series`, `debug_outputs/unknowns`) before saving Matplotlib figures.
+- OpenCV-based diagnostics crop images using pixel-coordinate boxes from config dicts, apply a legend mask rectangle, threshold by BGR color with a tolerance, and persist intermediate masks/images for inspection.

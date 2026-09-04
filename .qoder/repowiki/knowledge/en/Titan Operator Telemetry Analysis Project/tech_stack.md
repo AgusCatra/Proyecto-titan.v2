@@ -1,0 +1,1 @@
+Python 3 with pandas/numpy for data handling, scikit-learn for the operator-profile classifier, OpenCV + pytesseract for image-based signal extraction, pdfminer.six/pdfplumber/PyMuPDF for PDF parsing, matplotlib for plotting, customtkinter for the desktop UI, Streamlit for the web dashboard, and fpdf2 for generating PDF reports.

@@ -1,0 +1,6 @@
+- Database connections are opened through the `get_db_connection` context manager or created with `row_factory = sqlite3.Row` so results are accessed by column name.
+- Telemetry series are persisted as comma-separated string columns (`timestamps`, `valores`) in the `Telemetria` table and parsed back into float lists on read.
+- Operator behavior classification is driven by a fixed `BehaviorProfile` enum plus threshold rules inside `BehaviorAnalyzer._classify_behavior`, rather than ML models.
+- Each major component exposes a top-level orchestrator function (`extraer_toda_la_telemetria`, `extraer_telemetria_visual`, `analizar_comportamiento_completo`, `crear_reporte_pdf`, `crear_reporte_evolucion_pdf`) that returns structured dicts.
+- Per-graph configuration is centralized in module-level dictionaries (`GRAPH_CONFIGS` in `telemetry_parser.py`, `Y_RANGES` in `telemetry_extractor.py`, exercise catalog in `training_path.py`) instead of being scattered across logic.
+- Modules include `if __name__ == '__main__'` blocks that demonstrate usage against concrete file paths under `data/` and `debug_outputs/` directories.

@@ -1,0 +1,17 @@
+schema_version: 1
+module_path: tests
+title: Telemetry Extraction & Manifest Validation Test Scripts
+scope:
+    - tests/
+    - test_debug.py
+    - test_debug2.py
+    - test_extractor.py
+    - test_fallback.py
+    - test_final.py
+    - test_grafico.py
+    - test_mapper.py
+    - test_plot_unknowns.py
+source_files: []
+depends_on: []
+related_to:
+    - path: core

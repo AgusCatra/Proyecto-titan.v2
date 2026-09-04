@@ -1,0 +1,1 @@
+End-to-end Python project that extracts telemetry from PDF operator reports, trains an operator-profile classifier, and delivers Tkinter/Streamlit frontends plus training and diagnostic scripts.
