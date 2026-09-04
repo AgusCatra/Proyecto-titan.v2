@@ -41,3 +41,4 @@ data/exports/
 .pytest_cache/
 .coverage
 htmlcov/
+data/reports/*.pdf
