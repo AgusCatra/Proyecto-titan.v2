@@ -12,7 +12,7 @@ DROP TABLE IF EXISTS Sesiones;
 -- Almacena los datos generales de cada sesión de entrenamiento.
 --
 CREATE TABLE Sesiones (
-    id_sesion INTEGER PRIMARY KEY AUTOINCREMENT,
+    id_sesion INTEGER PRIMARY KEY,
     nombre_archivo_origen TEXT NOT NULL UNIQUE,
     nombre_operador TEXT,
     nombre_clase TEXT,
@@ -32,7 +32,7 @@ CREATE TABLE Sesiones (
 -- Almacena los datos agregados de la tabla "Consolidated Results".
 --
 CREATE TABLE ResumenEventos (
-    id_resumen INTEGER PRIMARY KEY AUTOINCREMENT,
+    id_resumen INTEGER PRIMARY KEY,
     id_sesion INTEGER NOT NULL,
     tipo_evento TEXT,
     conteo_eventos INTEGER,
@@ -46,7 +46,7 @@ CREATE TABLE ResumenEventos (
 -- Almacena las series de tiempo extraídas de los gráficos.
 --
 CREATE TABLE Telemetria (
-    id_telemetria INTEGER PRIMARY KEY AUTOINCREMENT,
+    id_telemetria INTEGER PRIMARY KEY,
     id_sesion_fk INTEGER NOT NULL,
     nombre_grafico TEXT NOT NULL, -- ej: "Brake Pad", "Steering"
     timestamps TEXT NOT NULL,     -- ej: "0.0,0.48,0.96,..."
