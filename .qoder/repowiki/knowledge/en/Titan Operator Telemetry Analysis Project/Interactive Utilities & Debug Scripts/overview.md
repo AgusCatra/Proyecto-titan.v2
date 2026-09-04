@@ -1,1 +1,0 @@
-Standalone helper scripts for interactive image color/region selection, PDF event extraction debugging, and one-shot SQLite database initialization for the Titan project.

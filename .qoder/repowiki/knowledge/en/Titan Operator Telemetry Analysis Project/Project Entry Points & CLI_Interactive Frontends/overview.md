@@ -1,1 +1,0 @@
-Top-level entry scripts that run the ETL pipeline, train the operator-profile classifier, drive the Tkinter desktop UI, serve the Streamlit web app, and produce comparative MVP analysis reports.

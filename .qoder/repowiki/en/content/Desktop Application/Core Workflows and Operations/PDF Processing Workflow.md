@@ -4,12 +4,21 @@
 **Referenced Files in This Document**
 - [app.py](file://app.py)
 - [streamlit_app.py](file://streamlit_app.py)
+- [core/pipeline.py](file://core/pipeline.py)
 - [core/pdf_parser.py](file://core/pdf_parser.py)
 - [core/db_manager.py](file://core/db_manager.py)
 - [core/telemetry_extractor.py](file://core/telemetry_extractor.py)
 - [core/behavior_analyzer.py](file://core/behavior_analyzer.py)
 - [database/schema.sql](file://database/schema.sql)
 </cite>
+
+## Update Summary
+**Changes Made**
+- Updated architecture overview to reflect centralized pipeline design
+- Modified orchestration section to show delegation pattern instead of internal implementation
+- Added new centralized pipeline component documentation
+- Updated dependency analysis to show new architectural relationships
+- Enhanced error handling documentation to reflect pipeline's robust approach
 
 ## Table of Contents
 1. [Introduction](#introduction)
@@ -23,12 +32,13 @@
 9. [Conclusion](#conclusion)
 
 ## Introduction
-This document explains the end-to-end PDF processing workflow in Proyecto Titán, from file selection to parsing, validation, ML-based operator profiling, and database storage. It focuses on the core method that orchestrates both duplicate detection and new session creation, details text extraction and event summarization, describes telemetry extraction and storage, and outlines error handling and user feedback across desktop and web interfaces.
+This document explains the end-to-end PDF processing workflow in Proyecto Titán, from file selection to parsing, validation, ML-based operator profiling, and database storage. The system now uses a centralized pipeline architecture where frontend applications delegate all PDF processing logic to a unified headless pipeline, eliminating code duplication and ensuring consistent behavior across desktop and web interfaces.
 
 ## Project Structure
-The workflow spans UI entry points, PDF parsing, telemetry extraction, ML prediction, and database persistence:
-- Desktop UI (Tkinter): app.py
-- Web UI (Streamlit): streamlit_app.py
+The workflow spans UI entry points, centralized pipeline processing, PDF parsing, telemetry extraction, ML prediction, and database persistence:
+- Desktop UI (Tkinter): app.py - delegates to centralized pipeline
+- Web UI (Streamlit): streamlit_app.py - delegates to centralized pipeline  
+- Centralized Pipeline: core/pipeline.py - orchestrates entire ETL process
 - PDF parsing: core/pdf_parser.py
 - Telemetry extraction: core/telemetry_extractor.py
 - Database management: core/db_manager.py
@@ -37,234 +47,268 @@ The workflow spans UI entry points, PDF parsing, telemetry extraction, ML predic
 
 ```mermaid
 graph TB
-UI["UI Layer<br/>Desktop (app.py) / Web (streamlit_app.py)"]
+UI["UI Layer<br/>Desktop (app.py) / Web (streamlit_app.py)<br/>Delegates to pipeline"]
+Pipeline["Centralized Pipeline<br/>core/pipeline.py"]
 Parser["PDF Parser<br/>core/pdf_parser.py"]
 Telemetry["Telemetry Extractor<br/>core/telemetry_extractor.py"]
 DB["Database Manager<br/>core/db_manager.py"]
 Schema["Schema<br/>database/schema.sql"]
 ML["ML Model<br/>joblib classifier"]
 Behavior["Behavior Analyzer<br/>core/behavior_analyzer.py"]
-UI --> Parser
-UI --> Telemetry
-UI --> DB
+UI --> Pipeline
+Pipeline --> Parser
+Pipeline --> Telemetry
+Pipeline --> DB
 Parser --> DB
 Telemetry --> DB
-UI --> ML
+Pipeline --> ML
 UI --> Behavior
 DB --> Schema
 ```
 
 **Diagram sources**
-- [app.py:33-42](file://app.py#L33-L42)
-- [streamlit_app.py:17-27](file://streamlit_app.py#L17-L27)
-- [core/pdf_parser.py:27-57](file://core/pdf_parser.py#L27-L57)
-- [core/telemetry_extractor.py:202-238](file://core/telemetry_extractor.py#L202-L238)
-- [core/db_manager.py:23-33](file://core/db_manager.py#L23-L33)
-- [database/schema.sql:14-52](file://database/schema.sql#L14-L52)
-
-**Section sources**
-- [app.py:308-589](file://app.py#L308-L589)
-- [streamlit_app.py:54-110](file://streamlit_app.py#L54-L110)
+- [app.py:29-33](file://app.py#L29-L33)
+- [streamlit_app.py:16-22](file://streamlit_app.py#L16-L22)
+- [core/pipeline.py:176-297](file://core/pipeline.py#L176-L297)
 - [core/pdf_parser.py:27-124](file://core/pdf_parser.py#L27-L124)
-- [core/telemetry_extractor.py:202-238](file://core/telemetry_extractor.py#L202-L238)
-- [core/db_manager.py:93-152](file://core/db_manager.py#L93-L152)
+- [core/telemetry_extractor.py:220-273](file://core/telemetry_extractor.py#L220-L273)
+- [core/db_manager.py:23-152](file://core/db_manager.py#L23-L152)
 - [database/schema.sql:14-59](file://database/schema.sql#L14-L59)
 
 ## Core Components
-- PDF parser: extracts session metadata and consolidated event summaries using regex patterns on page 1 text.
-- Telemetry extractor: detects chart regions via color segmentation, identifies curves, uses OCR for titles, calibrates time/value series, and maps to canonical graph names.
-- Database manager: provides connection context, session/event/telemetry insertion, duplicate lookup by filename, and telemetry retrieval for graphs.
-- ML integration: loads a joblib classifier, prepares features from parsed data, and predicts an operator profile used for reporting and learning paths.
-- Behavior analyzer: computes detailed metrics from stored telemetry for reporting and insights.
+- **Centralized Pipeline**: Orchestrates the entire PDF processing workflow with transactional safety, duplicate detection, and error handling
+- **PDF parser**: extracts session metadata and consolidated event summaries using regex patterns on page 1 text
+- **Telemetry extractor**: detects chart regions via color segmentation, identifies curves, uses OCR for titles, calibrates time/value series, and maps to canonical graph names
+- **Database manager**: provides connection context, session/event/telemetry insertion, duplicate lookup by filename, and telemetry retrieval for graphs
+- **ML integration**: loads a joblib classifier, prepares features from parsed data, and predicts an operator profile used for reporting and learning paths
+- **Behavior analyzer**: computes detailed metrics from stored telemetry for reporting and insights
 
 **Section sources**
+- [core/pipeline.py:176-297](file://core/pipeline.py#L176-L297)
 - [core/pdf_parser.py:27-124](file://core/pdf_parser.py#L27-L124)
-- [core/telemetry_extractor.py:202-238](file://core/telemetry_extractor.py#L202-L238)
-- [core/db_manager.py:93-152](file://core/db_manager.py#L93-L152)
+- [core/telemetry_extractor.py:220-273](file://core/telemetry_extractor.py#L220-L273)
+- [core/db_manager.py:23-152](file://core/db_manager.py#L23-L152)
 - [core/behavior_analyzer.py:150-167](file://core/behavior_analyzer.py#L150-L167)
 
 ## Architecture Overview
-The workflow is orchestrated by UI components that call a central processing method to handle both existing sessions and new ones. For new sessions, it parses the PDF, runs ML prediction, persists session and events, extracts and stores telemetry, and finally returns the session ID for downstream visualization and reporting.
+The workflow is now orchestrated through a centralized pipeline that both UI components call. Frontend applications delegate all PDF processing logic to `process_simulator_pdf`, which handles duplicate detection, PDF parsing, ML prediction, transactional database writes, and telemetry extraction in a single cohesive flow.
 
 ```mermaid
 sequenceDiagram
 participant User as "User"
 participant UI as "UI (app.py/streamlit_app.py)"
+participant Pipeline as "Centralized Pipeline"
 participant DB as "DB Manager"
 participant Parser as "PDF Parser"
 participant ML as "ML Classifier"
 participant Telemetry as "Telemetry Extractor"
 User->>UI : Select PDF
-UI->>DB : Lookup session by filename
+UI->>Pipeline : process_simulator_pdf(pdf_path)
 alt Duplicate found
-DB-->>UI : session_id
-UI-->>User : Show results for existing session
+Pipeline->>DB : Lookup session by filename
+DB-->>Pipeline : session_id
+Pipeline-->>UI : Return existing session_id
 else New session
-UI->>Parser : parse_pdf_report(pdf_path)
-Parser-->>UI : {session_data, summary_events}
-UI->>ML : predict(features)
-ML-->>UI : perfil_operador
-UI->>DB : BEGIN transaction
-UI->>DB : insert_session(parsed_data, perfil)
-UI->>DB : insert_summary_events(session_id, summary_events)
-UI->>Telemetry : extraer_toda_la_telemetria(pdf_path, duration)
-Telemetry-->>UI : {graph_name -> [(t,v)]}
+Pipeline->>Parser : parse_pdf_report(pdf_path)
+Parser-->>Pipeline : {session_data, summary_events}
+Pipeline->>ML : predict(features)
+ML-->>Pipeline : perfil_operador
+Pipeline->>DB : BEGIN transaction
+Pipeline->>DB : insert_session(parsed_data, perfil)
+Pipeline->>DB : insert_summary_events(session_id, summary_events)
+Pipeline->>Telemetry : extraer_toda_la_telemetria(pdf_path, duration)
+Telemetry-->>Pipeline : {graph_name -> [(t,v)]}
 loop For each graph
-UI->>DB : insert_telemetry_data(session_id, name, data)
+Pipeline->>DB : insert_telemetry_data(session_id, name, data)
 end
-UI->>DB : COMMIT
-UI-->>User : Success with session_id
+Pipeline->>DB : COMMIT
+Pipeline-->>UI : Success with session_id
 end
 ```
 
 **Diagram sources**
-- [app.py:514-547](file://app.py#L514-L547)
-- [streamlit_app.py:69-110](file://streamlit_app.py#L69-L110)
-- [core/pdf_parser.py:27-57](file://core/pdf_parser.py#L27-L57)
-- [core/telemetry_extractor.py:202-238](file://core/telemetry_extractor.py#L202-L238)
-- [core/db_manager.py:106-152](file://core/db_manager.py#L106-L152)
+- [app.py:505-531](file://app.py#L505-L531)
+- [streamlit_app.py:46-72](file://streamlit_app.py#L46-L72)
+- [core/pipeline.py:176-297](file://core/pipeline.py#L176-L297)
+- [core/pdf_parser.py:27-124](file://core/pdf_parser.py#L27-L124)
+- [core/telemetry_extractor.py:220-273](file://core/telemetry_extractor.py#L220-L273)
+- [core/db_manager.py:23-152](file://core/db_manager.py#L23-L152)
 
 ## Detailed Component Analysis
 
-### Orchestration: _procesar_y_obtener_id
-This method is the heart of the workflow. It performs:
-- Duplicate detection by filename
+### Centralized Pipeline Orchestration: process_simulator_pdf
+The centralized pipeline method is now the heart of the workflow, handling:
+- Idempotent duplicate detection by filename
 - PDF parsing and validation
 - ML feature preparation and prediction
 - Transactional database writes (session, events, telemetry)
 - File copy to exports directory
-- Return of session_id or None on failure
+- Comprehensive error collection and logging
+- Return of structured result dictionary
 
 ```mermaid
 flowchart TD
 Start(["Start"]) --> CheckDup["Check if filename exists in DB"]
-CheckDup --> |Yes| ReturnExisting["Return existing session_id"]
+CheckDup --> |Yes| ReturnCached["Return cached session_id"]
 CheckDup --> |No| ParsePDF["parse_pdf_report(pdf_path)"]
 ParsePDF --> Valid{"Parsed data valid?"}
-Valid --> |No| FailExit["Return None"]
+Valid --> |No| CollectErrors["Collect errors and return None"]
 Valid --> |Yes| LoadModel["Load ML model"]
 LoadModel --> Prepare["Prepare features for prediction"]
 Prepare --> Predict["Predict operator profile"]
-Predict --> BeginTx["BEGIN transaction"]
+Predict --> ExtractTelemetry["Extract telemetry series"]
+ExtractTelemetry --> BeginTx["BEGIN transaction"]
 BeginTx --> InsertSession["Insert session"]
 InsertSession --> InsertEvents["Insert summary events"]
-InsertEvents --> ExtractTelemetry["Extract telemetry series"]
-ExtractTelemetry --> StoreTelemetry["Store telemetry per graph"]
+InsertEvents --> StoreTelemetry["Store telemetry per graph"]
 StoreTelemetry --> CommitTx["COMMIT transaction"]
 CommitTx --> CopyFile["Copy PDF to exports"]
-CopyFile --> End(["Return new session_id"])
+CopyFile --> End(["Return structured result"])
 ```
 
 **Diagram sources**
-- [app.py:514-547](file://app.py#L514-L547)
-- [streamlit_app.py:69-110](file://streamlit_app.py#L69-L110)
-- [core/db_manager.py:106-152](file://core/db_manager.py#L106-L152)
+- [core/pipeline.py:176-297](file://core/pipeline.py#L176-L297)
 
 **Section sources**
-- [app.py:514-547](file://app.py#L514-L547)
-- [streamlit_app.py:69-110](file://streamlit_app.py#L69-L110)
+- [core/pipeline.py:176-297](file://core/pipeline.py#L176-L297)
+
+### Frontend Delegation Pattern
+Both frontend applications now use a simple delegation pattern:
+
+**Desktop UI (app.py)**:
+```python
+def _procesar_y_obtener_id(self, pdf_path: str) -> Optional[int]:
+    """Adapter fino de UI: delega 100% en ``core.pipeline.process_simulator_pdf``."""
+    resultado = process_simulator_pdf(
+        pdf_path,
+        profile_source="model",
+        db_path=self.DB_PATH,
+        exports_dir=self.EXPORTS_DIR,
+    )
+    # Handle errors and return session_id
+```
+
+**Web UI (streamlit_app.py)**:
+```python
+def _procesar_reporte(pdf_path: str) -> Optional[int]:
+    """Adapter fino de UI: delega 100% en ``core.pipeline.process_simulator_pdf``."""
+    resultado = process_simulator_pdf(
+        pdf_path,
+        profile_source="model",
+        db_path=DB_PATH,
+        models_path=MODELS_PATH,
+        exports_dir=EXPORTS_DIR,
+    )
+    # Display errors and return session_id
+```
+
+**Section sources**
+- [app.py:505-531](file://app.py#L505-L531)
+- [streamlit_app.py:46-72](file://streamlit_app.py#L46-L72)
 
 ### PDF Text Extraction: parse_pdf_report
-- Opens the PDF and reads page 1 text.
-- Extracts session metadata (operator name, class, exercise, score, start time, duration).
-- Extracts consolidated event rows into structured summaries.
-- Validates presence of required fields; returns None if invalid.
+- Opens the PDF and reads page 1 text
+- Extracts session metadata (operator name, class, exercise, score, start time, duration)
+- Extracts consolidated event rows into structured summaries
+- Validates presence of required fields; returns None if invalid
 
 Key behaviors:
-- Locale setup for date parsing.
-- Robust float/datetime/duration parsing helpers.
-- Regex-based extraction for key fields and consolidated results table.
+- Locale setup for date parsing
+- Robust float/datetime/duration parsing helpers
+- Regex-based extraction for key fields and consolidated results table
 
 **Section sources**
 - [core/pdf_parser.py:27-124](file://core/pdf_parser.py#L27-L124)
 
 ### Data Validation Steps
-- Session data must include operator name; otherwise parsing fails.
-- Duration string is converted to seconds; invalid values default safely.
-- Score is parsed as float; invalid values default to 0.0.
-- Event summaries are validated during insertion with type-safe conversions.
+- Session data must include operator name; otherwise parsing fails
+- Duration string is converted to seconds; invalid values default safely
+- Score is parsed as float; invalid values default to 0.0
+- Event summaries are validated during insertion with type-safe conversions
 
 **Section sources**
 - [core/pdf_parser.py:66-124](file://core/pdf_parser.py#L66-L124)
 - [core/db_manager.py:126-139](file://core/db_manager.py#L126-L139)
 
 ### Error Handling Mechanisms
-- PDF parsing exceptions return None with diagnostic logs.
-- ML model loading failures produce explicit user errors and abort processing.
-- Database operations use transactions; failures trigger rollback.
-- UI layers show toast messages and status updates; critical errors display stack traces in the results area.
+The centralized pipeline implements comprehensive error handling:
+- PDF parsing exceptions are collected and logged without aborting the entire process
+- ML model loading failures produce explicit warnings and allow session creation without profile
+- Database operations use transactions with automatic rollback on failure
+- UI layers receive structured error information for appropriate user feedback
 
 **Section sources**
-- [core/pdf_parser.py:55-57](file://core/pdf_parser.py#L55-L57)
-- [app.py:526-531](file://app.py#L526-L531)
-- [core/db_manager.py:106-152](file://core/db_manager.py#L106-L152)
-- [app.py:571-575](file://app.py#L571-L575)
+- [core/pipeline.py:221-297](file://core/pipeline.py#L221-L297)
+- [app.py:520-531](file://app.py#L520-L531)
+- [streamlit_app.py:61-72](file://streamlit_app.py#L61-L72)
 
 ### ML Model Integration and Feature Preparation
-- Loads a joblib classifier from models directory.
+The centralized pipeline includes robust ML integration:
+- Loads a joblib classifier from configurable path
 - Prepares features from parsed session data and event summaries:
   - Final score and duration
   - Per-event counts and penalties mapped to column names expected by the model
-- Handles missing or mismatched feature names by filling zeros.
-- Executes prediction to obtain operator profile used for reporting and learning path mapping.
+- Handles missing or mismatched feature names by filling zeros
+- Executes prediction to obtain operator profile used for reporting and learning path mapping
 
 ```mermaid
 classDiagram
-class AppOrchestrator {
+class CentralizedPipeline {
 +_preparar_datos_para_prediccion(parsed_data, feature_names) DataFrame
 +predict(model, df) str
++_resolve_profile(parsed_data, profile_source, models_path, errors) str
 }
 class MLModel {
 +feature_names_in_ str[]
 +predict(X) array
 }
-AppOrchestrator --> MLModel : "uses"
+CentralizedPipeline --> MLModel : "uses"
 ```
 
 **Diagram sources**
-- [app.py:549-569](file://app.py#L549-L569)
-- [streamlit_app.py:54-67](file://streamlit_app.py#L54-L67)
+- [core/pipeline.py:60-95](file://core/pipeline.py#L60-L95)
+- [core/pipeline.py:97-133](file://core/pipeline.py#L97-L133)
 
 **Section sources**
-- [app.py:526-534](file://app.py#L526-L534)
-- [app.py:549-569](file://app.py#L549-L569)
-- [streamlit_app.py:82-90](file://streamlit_app.py#L82-L90)
-- [streamlit_app.py:54-67](file://streamlit_app.py#L54-L67)
+- [core/pipeline.py:60-133](file://core/pipeline.py#L60-L133)
 
 ### Database Transaction Flow
-- Begins a transaction before writing session and related data.
-- Inserts session record with parsed metadata and predicted profile.
-- Inserts summarized events for the session.
-- Extracts telemetry series and inserts them per graph.
-- Commits on success; rolls back on any insertion failure.
+The centralized pipeline ensures transactional integrity:
+- Begins a transaction before writing session and related data
+- Inserts session record with parsed metadata and predicted profile
+- Inserts summarized events for the session
+- Extracts telemetry series and inserts them per graph
+- Commits on success; rolls back on any insertion failure
+- Provides comprehensive error reporting
 
 ```mermaid
 sequenceDiagram
-participant UI as "UI"
+participant Pipeline as "Centralized Pipeline"
 participant DB as "DB Manager"
-UI->>DB : BEGIN
-UI->>DB : INSERT Sesiones
-UI->>DB : INSERT ResumenEventos (batch)
-UI->>DB : INSERT Telemetria (per graph)
-DB-->>UI : OK
-UI->>DB : COMMIT
+Pipeline->>DB : BEGIN
+Pipeline->>DB : INSERT Sesiones
+Pipeline->>DB : INSERT ResumenEventos (batch)
+Pipeline->>DB : INSERT Telemetria (per graph)
+DB-->>Pipeline : OK
+Pipeline->>DB : COMMIT
+Note over Pipeline,DB : On error : Pipeline->>DB : ROLLBACK
 ```
 
 **Diagram sources**
-- [app.py:536-544](file://app.py#L536-L544)
-- [streamlit_app.py:93-108](file://streamlit_app.py#L93-L108)
+- [core/pipeline.py:264-290](file://core/pipeline.py#L264-L290)
 - [core/db_manager.py:106-152](file://core/db_manager.py#L106-L152)
 
 **Section sources**
-- [app.py:536-547](file://app.py#L536-L547)
-- [streamlit_app.py:93-110](file://streamlit_app.py#L93-L110)
+- [core/pipeline.py:264-290](file://core/pipeline.py#L264-L290)
 - [core/db_manager.py:106-152](file://core/db_manager.py#L106-L152)
 
 ### Telemetry Extraction and Storage
-- Detects chart candidates via color segmentation and morphological operations.
-- Uses OCR to identify chart titles; falls back to heuristics based on value ranges when OCR fails.
-- Calibrates pixel coordinates to real-world time and value scales using known ranges per graph.
-- Stores timestamps and values as comma-separated strings in the Telemetria table.
+The centralized pipeline handles telemetry extraction with best-effort approach:
+- Detects chart candidates via color segmentation and morphological operations
+- Uses OCR to identify chart titles; falls back to heuristics based on value ranges when OCR fails
+- Calibrates pixel coordinates to real-world time and value scales using known ranges per graph
+- Stores timestamps and values as comma-separated strings in the Telemetria table
+- Normalizes signals to canonical names for consistency
 
 ```mermaid
 flowchart TD
@@ -274,19 +318,17 @@ OCRTitle --> NameMap{"Name identified?"}
 NameMap --> |Yes| Calibrate["Calibrate series (time,value)"]
 NameMap --> |No| Fallback["Heuristic assignment by ranges"]
 Fallback --> Calibrate
-Calibrate --> Store["Store timestamps/values per graph"]
+Calibrate --> Normalize["Normalize to canonical signals"]
+Normalize --> Store["Store timestamps/values per graph"]
 ```
 
 **Diagram sources**
-- [core/telemetry_extractor.py:58-92](file://core/telemetry_extractor.py#L58-L92)
-- [core/telemetry_extractor.py:104-131](file://core/telemetry_extractor.py#L104-L131)
-- [core/telemetry_extractor.py:167-177](file://core/telemetry_extractor.py#L167-L177)
-- [core/telemetry_extractor.py:180-198](file://core/telemetry_extractor.py#L180-L198)
-- [core/telemetry_extractor.py:202-238](file://core/telemetry_extractor.py#L202-L238)
+- [core/telemetry_extractor.py:220-273](file://core/telemetry_extractor.py#L220-L273)
+- [core/pipeline.py:135-161](file://core/pipeline.py#L135-L161)
 
 **Section sources**
-- [core/telemetry_extractor.py:202-238](file://core/telemetry_extractor.py#L202-L238)
-- [core/db_manager.py:140-152](file://core/db_manager.py#L140-L152)
+- [core/telemetry_extractor.py:220-273](file://core/telemetry_extractor.py#L220-L273)
+- [core/pipeline.py:135-161](file://core/pipeline.py#L135-L161)
 
 ### Behavior Analysis Integration
 After successful processing, behavior analysis retrieves telemetry from the database and computes metrics such as braking intensity, steering volatility, acceleration spikes, fork height adjustments, tilt adjustments, and speed statistics. These metrics feed into textual reports and visualizations.
@@ -296,18 +338,21 @@ After successful processing, behavior analysis retrieves telemetry from the data
 - [core/behavior_analyzer.py:95-147](file://core/behavior_analyzer.py#L95-L147)
 
 ## Dependency Analysis
-- UI depends on PDF parser, telemetry extractor, DB manager, and ML model.
-- PDF parser has no runtime dependencies beyond standard libraries and pdfplumber.
-- Telemetry extractor depends on OpenCV, NumPy, pypdfium2, and Tesseract OCR.
-- DB manager abstracts SQLite interactions and provides safe connection handling.
-- Behavior analyzer reads from the database to compute metrics.
+The new architecture creates clear separation of concerns:
+- UI components depend only on the centralized pipeline interface
+- Pipeline depends on PDF parser, telemetry extractor, DB manager, and ML model
+- PDF parser has no runtime dependencies beyond standard libraries and pdfplumber
+- Telemetry extractor depends on OpenCV, NumPy, pypdfium2, and Tesseract OCR
+- DB manager abstracts SQLite interactions and provides safe connection handling
+- Behavior analyzer reads from the database to compute metrics
 
 ```mermaid
 graph LR
-UI["UI (app.py/streamlit_app.py)"] --> Parser["PDF Parser"]
-UI --> Telemetry["Telemetry Extractor"]
-UI --> DB["DB Manager"]
-UI --> ML["ML Model"]
+UI["UI (app.py/streamlit_app.py)"] --> Pipeline["Centralized Pipeline"]
+Pipeline --> Parser["PDF Parser"]
+Pipeline --> Telemetry["Telemetry Extractor"]
+Pipeline --> DB["DB Manager"]
+Pipeline --> ML["ML Model"]
 Parser --> DB
 Telemetry --> DB
 DB --> Schema["Schema"]
@@ -315,47 +360,45 @@ UI --> Behavior["Behavior Analyzer"]
 ```
 
 **Diagram sources**
-- [app.py:33-42](file://app.py#L33-L42)
-- [streamlit_app.py:17-27](file://streamlit_app.py#L17-L27)
+- [app.py:29-33](file://app.py#L29-L33)
+- [streamlit_app.py:16-22](file://streamlit_app.py#L16-L22)
+- [core/pipeline.py:33-44](file://core/pipeline.py#L33-L44)
 - [core/db_manager.py:23-33](file://core/db_manager.py#L23-L33)
 - [database/schema.sql:14-59](file://database/schema.sql#L14-L59)
 
 **Section sources**
-- [app.py:33-42](file://app.py#L33-L42)
-- [streamlit_app.py:17-27](file://streamlit_app.py#L17-L27)
+- [app.py:29-33](file://app.py#L29-L33)
+- [streamlit_app.py:16-22](file://streamlit_app.py#L16-L22)
+- [core/pipeline.py:33-44](file://core/pipeline.py#L33-L44)
 - [core/db_manager.py:23-33](file://core/db_manager.py#L23-L33)
 - [database/schema.sql:14-59](file://database/schema.sql#L14-L59)
 
 ## Performance Considerations
-- PDF parsing is limited to page 1 text; ensure reports place key metadata there.
-- Telemetry extraction uses image processing; performance depends on PDF resolution and chart complexity. Adjust scale and thresholds if needed.
-- Batch insertion of summary events reduces round-trips to the database.
-- Storing telemetry as comma-separated strings avoids per-point inserts but increases payload size; consider compression if datasets grow large.
-- ML prediction is lightweight once the model is loaded; ensure model caching at application startup for responsiveness.
-
-[No sources needed since this section provides general guidance]
+- PDF parsing is limited to page 1 text; ensure reports place key metadata there
+- Telemetry extraction uses image processing; performance depends on PDF resolution and chart complexity
+- Batch insertion of summary events reduces round-trips to the database
+- Storing telemetry as comma-separated strings avoids per-point inserts but increases payload size
+- ML prediction is lightweight once the model is loaded; ensure model caching at application startup
+- Centralized pipeline eliminates redundant processing between UI components
+- Transactional database operations improve data consistency and recovery
 
 ## Troubleshooting Guide
-Common issues and resolutions:
-- Missing ML model file: The UI displays a clear error indicating the expected path; ensure the classifier file exists under models.
-- Duplicate PDF detected: The system returns the existing session ID without reprocessing; verify filename uniqueness if you intend to process the same report again.
-- Parsing failures: If session data cannot be extracted (e.g., missing operator name), the method returns None; check PDF structure and ensure metadata appears on page 1.
-- Telemetry extraction failures: If charts are not detected or OCR fails, fallback heuristics may misassign graph names; review debug outputs and adjust color ranges or thresholds.
-- Database errors: Any insertion error triggers a rollback; inspect logs for SQL errors and validate schema consistency.
+Common issues and resolutions with the centralized pipeline:
+- Missing ML model file: The pipeline logs warnings and continues without profile assignment
+- Duplicate PDF detected: The system returns cached session ID without reprocessing
+- Parsing failures: If session data cannot be extracted, the pipeline collects errors and returns None
+- Telemetry extraction failures: Best-effort approach allows session creation even without telemetry
+- Database errors: Automatic rollback ensures data consistency; check logs for SQL errors
 
-User feedback:
-- Desktop UI shows toasts and status bar messages; critical errors print stack traces in the results area.
-- Streamlit UI shows errors and warnings inline; temporary files are cleaned up after processing.
+User feedback improvements:
+- Desktop UI shows structured error messages from pipeline results
+- Streamlit UI displays pipeline errors and success indicators inline
+- Both interfaces benefit from consistent error handling and status reporting
 
 **Section sources**
-- [app.py:526-531](file://app.py#L526-L531)
-- [app.py:514-547](file://app.py#L514-L547)
-- [app.py:571-575](file://app.py#L571-L575)
-- [streamlit_app.py:77-87](file://streamlit_app.py#L77-L87)
-- [core/pdf_parser.py:55-57](file://core/pdf_parser.py#L55-L57)
-- [core/db_manager.py:106-152](file://core/db_manager.py#L106-L152)
+- [core/pipeline.py:221-297](file://core/pipeline.py#L221-L297)
+- [app.py:520-531](file://app.py#L520-L531)
+- [streamlit_app.py:61-72](file://streamlit_app.py#L61-L72)
 
 ## Conclusion
-Proyecto Titán’s PDF processing workflow integrates robust text extraction, computer vision-based telemetry capture, ML-driven operator profiling, and reliable database persistence. The central orchestration method ensures efficient duplicate handling and consistent transactional storage. With clear error handling and user feedback, the system supports both desktop and web usage while providing actionable insights through behavior analysis and visualizations.
-
-[No sources needed since this section summarizes without analyzing specific files]
+Proyecto Titán's PDF processing workflow now leverages a centralized pipeline architecture that eliminates code duplication while maintaining robust functionality. The unified approach ensures consistent behavior across desktop and web interfaces, provides comprehensive error handling, and maintains transactional integrity for database operations. The modular design allows for easy maintenance and future enhancements while providing clear separation between UI presentation and business logic processing.

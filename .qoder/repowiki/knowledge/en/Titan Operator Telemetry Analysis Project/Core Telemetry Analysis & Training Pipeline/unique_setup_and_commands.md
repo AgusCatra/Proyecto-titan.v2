@@ -1,1 +1,0 @@
-Requires a SQLite database at `<repo>/database/titan.db` containing `Sesiones`, `Telemetria`, and `ResumenEventos` tables; each module has an `if __name__ == '__main__'` block that runs self-tests against sample data (e.g., `data/reports/report test.pdf` and session ID 1). The `graph_mapper` reads a sibling `mapeo.json` file for graph-name normalization.

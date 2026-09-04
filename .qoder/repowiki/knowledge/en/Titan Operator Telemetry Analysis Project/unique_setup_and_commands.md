@@ -1,1 +1,0 @@
-Install dependencies via `pip install -r requirements.txt`; run the full ETL + training + reporting workflow through the top-level entry scripts in `entry_scripts/`, and launch the desktop UI with the Tkinter script or the web dashboard with the Streamlit script.

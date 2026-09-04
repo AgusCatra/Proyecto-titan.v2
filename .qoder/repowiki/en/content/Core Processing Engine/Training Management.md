@@ -3,6 +3,7 @@
 <cite>
 **Referenced Files in This Document**
 - [app.py](file://app.py)
+- [streamlit_app.py](file://streamlit_app.py)
 - [core/training_manager.py](file://core/training_manager.py)
 - [core/training_path.py](file://core/training_path.py)
 - [core/behavior_analyzer.py](file://core/behavior_analyzer.py)
@@ -13,6 +14,14 @@
 - [core/telemetry_parser.py](file://core/telemetry_parser.py)
 - [database/schema.sql](file://database/schema.sql)
 </cite>
+
+## Update Summary
+**Changes Made**
+- Updated training management architecture section to reflect deprecation of `training_manager.py`
+- Added warning section about orphaned/deprecated components
+- Updated dependency analysis to show current production flow vs deprecated paths
+- Modified troubleshooting guide to address deprecated module issues
+- Updated conclusion to reflect current system state
 
 ## Table of Contents
 1. [Introduction](#introduction)
@@ -27,15 +36,19 @@
 10. [Appendices](#appendices)
 
 ## Introduction
-This document describes the training management system for operator skill assessment and learning path recommendations. It covers how training sessions are created, tracked, and completed; how behavior analysis algorithms evaluate operator competency across exercises to produce proficiency indicators; how personalized learning paths are generated based on performance gaps; and how results integrate with behavioral telemetry, historical performance data, and reporting outputs. It also addresses scalability considerations for large operator populations, batch processing capabilities, and automated plan generation.
+This document describes the training management system for operator skill assessment and learning path recommendations. **Important Note**: The legacy `training_manager.py` module is currently orphaned and deprecated due to missing database helper functions and should not be used in production. The current production system uses direct frontend implementations with hardcoded learning path dictionaries and ML-based profile classification.
+
+The system covers how training sessions are created, tracked, and completed; how behavior analysis algorithms evaluate operator competency across exercises to produce proficiency indicators; how personalized learning paths are generated based on performance gaps; and how results integrate with behavioral telemetry, historical performance data, and reporting outputs. It also addresses scalability considerations for large operator populations, batch processing capabilities, and automated plan generation.
 
 ## Project Structure
-The system is organized into a user-facing application, core analytics modules, database schema, and utilities for parsing reports and generating outputs:
-- Application layer: app.py orchestrates UI workflows, PDF ingestion, model-based classification, storage, and report generation.
+The system is organized into user-facing applications, core analytics modules, database schema, and utilities for parsing reports and generating outputs:
+- Application layers: 
+  - Desktop UI: app.py orchestrates workflows using direct database queries and hardcoded learning paths
+  - Web UI: streamlit_app.py provides web interface with similar functionality
 - Core modules:
   - Behavior analysis and profiling: core/behavior_analyzer.py
-  - Learning path recommendation: core/training_path.py
-  - Training orchestration: core/training_manager.py
+  - Learning path recommendation: core/training_path.py (deprecated usage)
+  - Legacy training orchestration: core/training_manager.py (**DEPRECATED - ORPHANED**)
   - Data persistence: core/db_manager.py and database/schema.sql
   - Reporting: core/reporter.py and core/report_generator.py
   - Input parsing: core/pdf_parser.py and core/telemetry_parser.py
@@ -48,50 +61,59 @@ App --> DBMgr["core/db_manager.py"]
 App --> Reporter["core/reporter.py"]
 App --> ReportGen["core/report_generator.py"]
 App --> Analyzer["core/behavior_analyzer.py"]
-App --> PathGen["core/training_path.py"]
-App --> TrainMgr["core/training_manager.py"]
+Streamlit["streamlit_app.py"] --> Parser
+Streamlit --> DBMgr
+Streamlit --> Reporter
+Streamlit --> Analyzer
 DBMgr --> Schema["database/schema.sql"]
+TrainingManager["core/training_manager.py<br/>⚠️ DEPRECATED"] -.-> Analyzer
+TrainingManager -.-> PathGen["core/training_path.py"]
 ```
 
 **Diagram sources**
-- [app.py:33-42](file://app.py#L33-L42)
+- [app.py:28-33](file://app.py#L28-L33)
+- [streamlit_app.py:16-21](file://streamlit_app.py#L16-L21)
 - [core/db_manager.py:106-152](file://core/db_manager.py#L106-L152)
 - [database/schema.sql:14-58](file://database/schema.sql#L14-L58)
+- [core/training_manager.py:1-16](file://core/training_manager.py#L1-L16)
 
 **Section sources**
-- [app.py:33-42](file://app.py#L33-L42)
+- [app.py:28-33](file://app.py#L28-L33)
+- [streamlit_app.py:16-21](file://streamlit_app.py#L16-L21)
 - [database/schema.sql:14-58](file://database/schema.sql#L14-L58)
 
 ## Core Components
 - Session creation and tracking:
   - Sessions are created from parsed PDF reports, storing operator metadata, exercise details, duration, final score, and predicted profile. Summary events and telemetry series are persisted per session.
+  - **Current Implementation**: Both app.py and streamlit_app.py handle session management directly without using the deprecated TrainingManager class.
 - Skill assessment and profiling:
   - A rule-based classifier evaluates session metrics (score, duration, penalties, collisions, errors) to assign an operator behavior profile used for recommendations.
+  - **Production Flow**: Profiles come from ML model predictions rather than the deprecated training manager.
 - Learning path recommendation:
-  - Based on the assigned profile, a curated sequence of exercises is recommended to address specific competency gaps.
+  - **Current Production**: Hardcoded dictionaries in both app.py and streamlit_app.py map profiles to recommended exercises.
+  - **Legacy System**: The deprecated training_manager.py attempted to use a more sophisticated approach via training_path.py but is non-functional.
 - Reporting and evolution tracking:
   - Individual and comparative reports are generated in text and PDF formats, including telemetry-derived insights and feedback narratives.
 
 **Section sources**
 - [core/db_manager.py:106-152](file://core/db_manager.py#L106-L152)
 - [core/behavior_analyzer.py:26-68](file://core/behavior_analyzer.py#L26-L68)
-- [core/training_path.py:5-86](file://core/training_path.py#L5-L86)
-- [core/reporter.py:19-122](file://core/reporter.py#L19-L122)
-- [core/report_generator.py:28-149](file://core/report_generator.py#L28-L149)
+- [app.py:354-360](file://app.py#L354-L360)
+- [streamlit_app.py:34-40](file://streamlit_app.py#L34-L40)
+- [core/training_manager.py:1-16](file://core/training_manager.py#L1-L16)
 
 ## Architecture Overview
-The end-to-end flow starts with a PDF report input, proceeds through parsing, optional ML-based classification, storage, telemetry extraction, behavior analysis, and culminates in personalized learning paths and reports.
+The end-to-end flow starts with a PDF report input, proceeds through parsing, optional ML-based classification, storage, telemetry extraction, behavior analysis, and culminates in personalized learning paths and reports. **Note**: The deprecated training_manager.py is not part of this production flow.
 
 ```mermaid
 sequenceDiagram
 participant User as "User"
-participant App as "app.py"
+participant App as "app.py/streamlit_app.py"
 participant Parser as "pdf_parser.py"
 participant Model as "ML Model"
 participant DB as "db_manager.py"
 participant Telemetry as "telemetry_parser.py"
 participant Analyzer as "behavior_analyzer.py"
-participant Path as "training_path.py"
 participant Reporter as "reporter.py / report_generator.py"
 User->>App : Open PDF report
 App->>Parser : parse_pdf_report()
@@ -104,8 +126,6 @@ Telemetry-->>App : telemetry series
 App->>DB : insert_telemetry_data()
 App->>Analyzer : analyze_session()
 Analyzer-->>App : BehaviorProfile
-App->>Path : generate_path(profile)
-Path-->>App : recommended exercises
 App->>Reporter : generar_texto_reporte_individual()
 Reporter-->>App : narrative report
 App->>Reporter : crear_reporte_pdf()
@@ -114,11 +134,11 @@ Reporter-->>User : PDF output
 
 **Diagram sources**
 - [app.py:411-449](file://app.py#L411-L449)
+- [streamlit_app.py:46-72](file://streamlit_app.py#L46-L72)
 - [core/pdf_parser.py:27-57](file://core/pdf_parser.py#L27-L57)
 - [core/db_manager.py:106-152](file://core/db_manager.py#L106-L152)
 - [core/telemetry_parser.py:125-154](file://core/telemetry_parser.py#L125-L154)
 - [core/behavior_analyzer.py:36-68](file://core/behavior_analyzer.py#L36-L68)
-- [core/training_path.py:11-22](file://core/training_path.py#L11-L22)
 - [core/reporter.py:51-92](file://core/reporter.py#L51-L92)
 - [core/report_generator.py:28-75](file://core/report_generator.py#L28-L75)
 
@@ -127,10 +147,11 @@ Reporter-->>User : PDF output
 ### Session Management and Progress Tracking
 - Session creation:
   - The application parses PDFs to extract session metadata and summary events, persists them via database functions, and stores telemetry time-series for visualization and analysis.
+  - **Current Implementation**: Both frontends handle session management directly without relying on the deprecated TrainingManager.
 - Progress tracking:
   - Each session records final score, duration, and predicted profile. Evolution reports compare two sessions to quantify improvement or regression.
 - Completion criteria:
-  - While no explicit completion gate exists in code, profiles such as “Eficiente” indicate high proficiency based on thresholds applied by the behavior analyzer.
+  - While no explicit completion gate exists in code, profiles such as "Eficiente" indicate high proficiency based on thresholds applied by the behavior analyzer.
 
 ```mermaid
 flowchart TD
@@ -140,7 +161,7 @@ StoreSession --> StoreEvents["Insert summary events"]
 StoreEvents --> ExtractTelemetry["Extract telemetry series"]
 ExtractTelemetry --> StoreTelemetry["Store telemetry per graph"]
 StoreTelemetry --> Analyze["Analyze behavior & assign profile"]
-Analyze --> Recommend["Generate learning path"]
+Analyze --> Recommend["Use hardcoded learning paths"]
 Recommend --> Report["Generate individual/evolution reports"]
 Report --> End(["End"])
 ```
@@ -150,12 +171,40 @@ Report --> End(["End"])
 - [core/db_manager.py:106-152](file://core/db_manager.py#L106-L152)
 - [core/telemetry_parser.py:125-154](file://core/telemetry_parser.py#L125-L154)
 - [core/behavior_analyzer.py:36-68](file://core/behavior_analyzer.py#L36-L68)
-- [core/training_path.py:11-22](file://core/training_path.py#L11-L22)
-- [core/reporter.py:51-92](file://core/reporter.py#L51-L92)
+- [app.py:354-360](file://app.py#L354-L360)
+- [streamlit_app.py:34-40](file://streamlit_app.py#L34-L40)
 
 **Section sources**
 - [core/db_manager.py:106-152](file://core/db_manager.py#L106-L152)
 - [core/reporter.py:98-122](file://core/reporter.py#L98-L122)
+
+### ⚠️ Deprecated Training Manager Module
+**CRITICAL**: The `core/training_manager.py` module is currently orphaned and deprecated. It should not be used in production until missing database helper functions are implemented.
+
+- **Status**: Orphaned module with broken dependencies
+- **Issue**: Depends on non-existent database functions (`get_sessions_by_operator`, `get_summary_events_by_session`)
+- **Warning**: Emits `DeprecationWarning` when imported
+- **Impact**: Calling `TrainingManager.evaluate_operator()` raises `RuntimeError` due to missing imports
+
+```mermaid
+classDiagram
+class TrainingManager {
++__init__(db_path)
++evaluate_operator(operator_name) Dict
+-_get_operator_sessions(conn, operator_name) List
+-_get_session_events(conn, session_id) List
+-_generate_recommendation(profile) str
+}
+note for TrainingManager "⚠️ DEPRECATED - ORPHANED MODULE\nMissing DB helpers : \n- get_sessions_by_operator\n- get_summary_events_by_session"
+```
+
+**Diagram sources**
+- [core/training_manager.py:32-65](file://core/training_manager.py#L32-L65)
+- [core/training_manager.py:67-94](file://core/training_manager.py#L67-L94)
+
+**Section sources**
+- [core/training_manager.py:1-16](file://core/training_manager.py#L1-L16)
+- [core/training_manager.py:67-94](file://core/training_manager.py#L67-L94)
 
 ### Skill Assessment Algorithms
 - Metrics extraction:
@@ -191,31 +240,30 @@ BehaviorAnalyzer --> BehaviorProfile : "returns"
 - [core/behavior_analyzer.py:95-147](file://core/behavior_analyzer.py#L95-L147)
 
 ### Learning Path Recommendation Engine
-- Profile-driven mapping:
-  - Each behavior profile maps to a tailored sequence of exercises designed to address identified gaps (e.g., precision maneuvers for spatial issues; efficiency drills for inefficient operators).
-- Exercise catalog:
-  - Includes ambientación, control de velocidad, maniobras de precisión, eficiencia operativa with durations and difficulty levels.
+- **Current Production Implementation**:
+  - Hardcoded dictionaries in both app.py and streamlit_app.py provide simple profile-to-path mapping
+  - Maps profiles like "Novato", "Apurado", "Sin nocion del espacio", etc. to specific exercise sequences
+- **Legacy System (Deprecated)**:
+  - The training_path.py module provides a more sophisticated approach with exercise catalogs and difficulty levels
+  - Currently not used by production frontends due to the orphaned training_manager.py
 
 ```mermaid
 flowchart TD
 P["BehaviorProfile"] --> Map{"Map to path"}
-Map --> |Eficiente| Adv["Advanced path"]
-Map --> |Apurado| Speed["Speed control path"]
-Map --> |Sin Noción del Espacio| Spatial["Spatial maneuvers path"]
-Map --> |Ineficiente| Efficiency["Efficiency path"]
-Map --> |Novato| Onboarding["Onboarding path"]
-Adv --> Output["Recommended exercises"]
-Speed --> Output
-Spatial --> Output
-Efficiency --> Output
-Onboarding --> Output
+Map --> |Production| Hardcoded["Hardcoded Dictionary<br/>app.py/streamlit_app.py"]
+Map --> |Legacy| Advanced["TrainingPath Class<br/>⚠️ NOT USED"]
+Hardcoded --> Output["Recommended exercises"]
+Advanced --> Output
 ```
 
 **Diagram sources**
+- [app.py:354-360](file://app.py#L354-L360)
+- [streamlit_app.py:34-40](file://streamlit_app.py#L34-L40)
 - [core/training_path.py:11-22](file://core/training_path.py#L11-L22)
-- [core/training_path.py:24-86](file://core/training_path.py#L24-L86)
 
 **Section sources**
+- [app.py:354-360](file://app.py#L354-L360)
+- [streamlit_app.py:34-40](file://streamlit_app.py#L34-L40)
 - [core/training_path.py:24-86](file://core/training_path.py#L24-L86)
 
 ### Reporting Formats and Integration
@@ -228,7 +276,7 @@ Onboarding --> Output
 
 ```mermaid
 sequenceDiagram
-participant App as "app.py"
+participant App as "app.py/streamlit_app.py"
 participant Reporter as "reporter.py"
 participant Gen as "report_generator.py"
 App->>Reporter : generar_texto_reporte_individual()
@@ -293,13 +341,15 @@ SESIONES ||--o{ TELEMETRIA : "has many"
 - [database/schema.sql:14-58](file://database/schema.sql#L14-L58)
 
 ### Custom Training Modules and Configuration
-- Exercise catalog:
-  - Modular definitions for exercises with names, descriptions, durations, and difficulty levels can be extended within the training path module.
-- Assessment criteria configuration:
+- **Current Production Configuration**:
+  - Exercise catalogs are defined as hardcoded dictionaries in both app.py and streamlit_app.py
+  - Simple profile-to-exercise mapping without complex categorization
+- **Assessment criteria configuration**:
   - Thresholds for scoring, duration, penalties, collisions, and errors are centralized in the behavior analyzer and can be tuned to reflect organizational standards.
 
 **Section sources**
-- [core/training_path.py:24-51](file://core/training_path.py#L24-L51)
+- [app.py:354-360](file://app.py#L354-L360)
+- [streamlit_app.py:34-40](file://streamlit_app.py#L34-L40)
 - [core/behavior_analyzer.py:28-34](file://core/behavior_analyzer.py#L28-L34)
 
 ### Integration Points
@@ -316,11 +366,11 @@ SESIONES ||--o{ TELEMETRIA : "has many"
 
 ## Dependency Analysis
 Key dependencies and coupling:
-- app.py depends on parsing, storage, analysis, path generation, and reporting modules.
-- db_manager provides data access abstractions and context-managed connections.
-- behavior_analyzer relies on session and event data plus telemetry functions.
-- training_path depends on behavior profiles to select appropriate exercise sequences.
-- reporter and report_generator depend on analyzed data to produce outputs.
+- **Production Flow**: app.py and streamlit_app.py depend on parsing, storage, analysis, and reporting modules directly
+- **Deprecated Path**: training_manager.py depends on non-existent database functions and is not imported by any production code
+- db_manager provides data access abstractions and context-managed connections
+- behavior_analyzer relies on session and event data plus telemetry functions
+- reporter and report_generator depend on analyzed data to produce outputs
 
 ```mermaid
 graph LR
@@ -328,24 +378,28 @@ App["app.py"] --> Parser["pdf_parser.py"]
 App --> Telemetry["telemetry_parser.py"]
 App --> DBMgr["db_manager.py"]
 App --> Analyzer["behavior_analyzer.py"]
-App --> Path["training_path.py"]
 App --> Reporter["reporter.py"]
 App --> ReportGen["report_generator.py"]
-Analyzer --> DBMgr
-Reporter --> DBMgr
-ReportGen --> Reporter
+Streamlit["streamlit_app.py"] --> Parser
+Streamlit --> DBMgr
+Streamlit --> Reporter
+Streamlit --> Analyzer
+TrainingManager["training_manager.py<br/>⚠️ ORPHANED"] -.-> DBMgr
+TrainingManager -.-> Analyzer
 ```
 
 **Diagram sources**
-- [app.py:33-42](file://app.py#L33-L42)
+- [app.py:28-33](file://app.py#L28-L33)
+- [streamlit_app.py:16-21](file://streamlit_app.py#L16-L21)
 - [core/db_manager.py:106-152](file://core/db_manager.py#L106-L152)
 - [core/behavior_analyzer.py:36-68](file://core/behavior_analyzer.py#L36-L68)
-- [core/training_path.py:11-22](file://core/training_path.py#L11-L22)
 - [core/reporter.py:51-92](file://core/reporter.py#L51-L92)
 - [core/report_generator.py:28-75](file://core/report_generator.py#L28-L75)
+- [core/training_manager.py:28-30](file://core/training_manager.py#L28-L30)
 
 **Section sources**
-- [app.py:33-42](file://app.py#L33-L42)
+- [app.py:28-33](file://app.py#L28-L33)
+- [streamlit_app.py:16-21](file://streamlit_app.py#L16-L21)
 - [core/db_manager.py:106-152](file://core/db_manager.py#L106-L152)
 
 ## Performance Considerations
@@ -361,8 +415,6 @@ ReportGen --> Reporter
 - Automated plan generation:
   - Schedule periodic runs to generate updated learning paths for all active operators based on latest sessions.
 
-[No sources needed since this section provides general guidance]
-
 ## Troubleshooting Guide
 Common issues and resolutions:
 - Missing or invalid PDF content:
@@ -373,27 +425,41 @@ Common issues and resolutions:
   - Confirm the database path and permissions; context manager ensures proper connection handling.
 - Telemetry extraction errors:
   - Check page indices and image availability; ensure calibration parameters match report layout.
+- **⚠️ Deprecated Module Issues**:
+  - If you encounter `ImportError` or `RuntimeError` related to `training_manager.py`, this is expected behavior
+  - The module is intentionally broken and should not be used in production
+  - Use the direct frontend implementations in app.py or streamlit_app.py instead
+  - Error messages will indicate missing database helper functions
 
 **Section sources**
 - [core/pdf_parser.py:27-57](file://core/pdf_parser.py#L27-L57)
 - [app.py:526-535](file://app.py#L526-L535)
 - [core/db_manager.py:23-33](file://core/db_manager.py#L23-L33)
 - [core/telemetry_parser.py:125-154](file://core/telemetry_parser.py#L125-L154)
+- [core/training_manager.py:73-94](file://core/training_manager.py#L73-L94)
 
 ## Conclusion
-The training management system integrates PDF-based session ingestion, robust behavior analysis, and personalized learning path recommendations to support operator skill development. It provides comprehensive reporting and evolution tracking, enabling continuous improvement. With enhancements for batch processing, asynchronous execution, and scalable storage strategies, the system can effectively support large operator populations and automated training plan generation.
+The training management system integrates PDF-based session ingestion, robust behavior analysis, and personalized learning path recommendations to support operator skill development. **Important Update**: The legacy `training_manager.py` module is currently orphaned and deprecated due to missing database helper functions and should not be used in production. The current production system uses direct frontend implementations with hardcoded learning path dictionaries and ML-based profile classification.
 
-[No sources needed since this section summarizes without analyzing specific files]
+The system provides comprehensive reporting and evolution tracking, enabling continuous improvement. With enhancements for batch processing, asynchronous execution, and scalable storage strategies, the system can effectively support large operator populations and automated training plan generation. Future work may involve implementing the missing database helpers to restore the training_manager.py functionality or consolidating on the current simpler approach.
 
 ## Appendices
 
-### Example: Custom Training Module Definition
-- Add a new exercise entry to the catalog with name, description, duration, and difficulty.
-- Create a corresponding path method to include it in relevant profiles.
+### Example: Current Production Learning Path Configuration
+- **app.py implementation**:
+  ```python
+  self.RUTAS_DE_APRENDIZAJE = {
+      "Novato": {"titulo": "Ruta de Iniciación", "ejercicios": ["1.1. Controles", "2.1. Conducción básica"]},
+      "Sin nocion del espacio": {"titulo": "Ruta de Precisión Espacial", "ejercicios": ["2.2. Curvas en S", "5.7. Carga Vertical"]},
+      "Apurado": {"titulo": "Ruta de Control de Impulsos", "ejercicios": ["Módulo 4 (Apilamiento)", "7.1. Operación con Señales"]},
+      "Ineficiente": {"titulo": "Ruta de Productividad", "ejercicios": ["Módulo 6 (Estanterías)"]},
+      "Eficiente": {"titulo": "Ruta de Especialización", "ejercicios": ["Módulo 8 (Cargas Pesadas)"]}
+  }
+  ```
 
 **Section sources**
-- [core/training_path.py:24-51](file://core/training_path.py#L24-L51)
-- [core/training_path.py:53-86](file://core/training_path.py#L53-L86)
+- [app.py:354-360](file://app.py#L354-L360)
+- [streamlit_app.py:34-40](file://streamlit_app.py#L34-L40)
 
 ### Example: Assessment Criteria Configuration
 - Adjust thresholds in the behavior analyzer to align with organizational standards (e.g., score_threshold, duration_threshold, collision_threshold, error_threshold).
@@ -408,3 +474,15 @@ The training management system integrates PDF-based session ingestion, robust be
 **Section sources**
 - [core/reporter.py:51-92](file://core/reporter.py#L51-L92)
 - [core/reporter.py:98-122](file://core/reporter.py#L98-L122)
+
+### Deprecated Module Migration Guide
+If you need to migrate away from the deprecated training_manager.py:
+
+1. **Remove imports** of training_manager from your codebase
+2. **Use direct frontend implementations** from app.py or streamlit_app.py
+3. **Implement custom learning path logic** using the hardcoded dictionary pattern
+4. **Handle errors gracefully** when attempting to use the deprecated module
+
+**Section sources**
+- [core/training_manager.py:1-16](file://core/training_manager.py#L1-L16)
+- [core/training_manager.py:73-94](file://core/training_manager.py#L73-L94)

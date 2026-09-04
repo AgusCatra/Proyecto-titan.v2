@@ -1,1 +1,0 @@
-`setup_database.py` must be run once before other components use the DB; it deletes any existing `database/titan.db` and requires `database/schema.sql` to exist. The two debug PDF scripts expect input PDFs at `data/reports/report test.pdf` by default and write output CSV/PNG files into the current working directory.

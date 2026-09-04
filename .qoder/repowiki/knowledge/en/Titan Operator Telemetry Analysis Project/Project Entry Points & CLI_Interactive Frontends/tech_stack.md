@@ -1,1 +1,0 @@
-Python with customtkinter + tkinter for the desktop GUI, Streamlit + matplotlib for the web UI, pandas/sqlalchemy-style sqlite3 for data access, scikit-learn RandomForestClassifier trained via joblib, and PyPDF-like parsing via `core.pdf_parser`.

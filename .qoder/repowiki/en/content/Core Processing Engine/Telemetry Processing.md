@@ -11,9 +11,18 @@
 - [plotter.py](file://core/plotter.py)
 - [training_manager.py](file://core/training_manager.py)
 - [report_generator.py](file://core/report_generator.py)
+- [pipeline.py](file://core/pipeline.py)
 - [schema.sql](file://database/schema.sql)
 - [mapeo.json](file://mapeo.json)
+- [test_mapper.py](file://test_mapper.py)
 </cite>
+
+## Update Summary
+**Changes Made**
+- Updated Graph Name Mapping section to reflect enhanced contract handling for both legacy and canonical signal names
+- Added detailed explanation of the critical contract fix between visual telemetry extractor and mapping system
+- Enhanced troubleshooting guide with specific guidance for the graph mapper improvements
+- Updated architecture diagrams to show the improved data flow through the graph mapper
 
 ## Table of Contents
 1. [Introduction](#introduction)
@@ -40,7 +49,7 @@ This document explains the telemetry processing system that extracts, validates,
 The telemetry subsystem is implemented across several modules:
 - PDF parsing and metadata extraction
 - Graph extraction and calibration to time-series
-- Mapping and normalization of graph names
+- Mapping and normalization of graph names with enhanced contract handling
 - Storage in a relational database
 - Behavior analysis and metric computation
 - Visualization and reporting
@@ -49,7 +58,7 @@ The telemetry subsystem is implemented across several modules:
 graph TB
 A["PDF Report"] --> B["PDF Parser<br/>metadata + events"]
 B --> C["Telemetry Extractor / Parser<br/>graphs → time series"]
-C --> D["Graph Mapper<br/>name mapping"]
+C --> D["Enhanced Graph Mapper<br/>legacy & canonical name mapping"]
 D --> E["DB Manager<br/>store sessions, events, telemetry"]
 E --> F["Behavior Analyzer<br/>metrics & classification"]
 F --> G["Plotter<br/>visualization"]
@@ -60,7 +69,7 @@ F --> H["Report Generator<br/>PDF reports"]
 - [pdf_parser.py:27-57](file://core/pdf_parser.py#L27-L57)
 - [telemetry_extractor.py:202-238](file://core/telemetry_extractor.py#L202-L238)
 - [telemetry_parser.py:125-154](file://core/telemetry_parser.py#L125-L154)
-- [graph_mapper.py:13-31](file://core/graph_mapper.py#L13-L31)
+- [graph_mapper.py:60-92](file://core/graph_mapper.py#L60-L92)
 - [db_manager.py:106-151](file://core/db_manager.py#L106-L151)
 - [behavior_analyzer.py:150-167](file://core/behavior_analyzer.py#L150-L167)
 - [plotter.py:15-69](file://core/plotter.py#L15-L69)
@@ -75,7 +84,7 @@ F --> H["Report Generator<br/>PDF reports"]
 - Telemetry Extractors: Two complementary approaches:
   - OCR-based visual extraction from PDF pages using color segmentation and curve tracing.
   - Config-driven extraction targeting specific images on known pages.
-- Graph Mapper: Normalizes extracted graph keys to canonical sensor names via a JSON mapping.
+- **Enhanced Graph Mapper**: Normalizes extracted graph keys to canonical sensor names via a JSON mapping, now supporting both legacy `Graph_X_Y` keys and direct canonical signal names.
 - Database Manager: Persists sessions, event summaries, and telemetry time series; provides retrieval utilities.
 - Behavior Analyzer: Computes metrics (braking, steering, acceleration, fork height, tilt, speed) and classifies operator behavior.
 - Plotter: Renders telemetry time series into UI canvases.
@@ -86,7 +95,7 @@ F --> H["Report Generator<br/>PDF reports"]
 - [pdf_parser.py:27-57](file://core/pdf_parser.py#L27-L57)
 - [telemetry_extractor.py:202-238](file://core/telemetry_extractor.py#L202-L238)
 - [telemetry_parser.py:125-154](file://core/telemetry_parser.py#L125-L154)
-- [graph_mapper.py:13-31](file://core/graph_mapper.py#L13-L31)
+- [graph_mapper.py:60-92](file://core/graph_mapper.py#L60-L92)
 - [db_manager.py:36-87](file://core/db_manager.py#L36-L87)
 - [behavior_analyzer.py:95-167](file://core/behavior_analyzer.py#L95-L167)
 - [plotter.py:15-69](file://core/plotter.py#L15-L69)
@@ -94,7 +103,7 @@ F --> H["Report Generator<br/>PDF reports"]
 - [report_generator.py:28-75](file://core/report_generator.py#L28-L75)
 
 ## Architecture Overview
-End-to-end flow from PDF to insights:
+End-to-end flow from PDF to insights with enhanced graph mapping:
 
 ```mermaid
 sequenceDiagram
@@ -102,7 +111,7 @@ participant U as "User"
 participant PP as "PDF Parser"
 participant TE as "Telemetry Extractor"
 participant TP as "Telemetry Parser"
-participant GM as "Graph Mapper"
+participant GM as "Enhanced Graph Mapper"
 participant DB as "DB Manager"
 participant BA as "Behavior Analyzer"
 participant PL as "Plotter"
@@ -114,6 +123,7 @@ TE-->>U : Raw graph series (OCR-based)
 U->>TP : PDF path + total duration
 TP-->>U : Config-driven graph series
 U->>GM : Map raw graph names to canonical names
+Note over GM : Handles both legacy Graph_X_Y keys<br/>and direct canonical signal names
 GM-->>U : Mapped telemetry dict
 U->>DB : Insert session, events, telemetry
 DB-->>U : Persisted IDs
@@ -127,7 +137,7 @@ U->>RG : Generate PDF reports
 - [pdf_parser.py:27-57](file://core/pdf_parser.py#L27-L57)
 - [telemetry_extractor.py:202-238](file://core/telemetry_extractor.py#L202-L238)
 - [telemetry_parser.py:125-154](file://core/telemetry_parser.py#L125-L154)
-- [graph_mapper.py:13-31](file://core/graph_mapper.py#L13-L31)
+- [graph_mapper.py:60-92](file://core/graph_mapper.py#L60-L92)
 - [db_manager.py:106-151](file://core/db_manager.py#L106-L151)
 - [behavior_analyzer.py:150-167](file://core/behavior_analyzer.py#L150-L167)
 - [plotter.py:15-69](file://core/plotter.py#L15-L69)
@@ -219,16 +229,40 @@ P-->>P : Aggregate all sensors
 - [telemetry_parser.py:81-123](file://core/telemetry_parser.py#L81-L123)
 - [telemetry_parser.py:125-154](file://core/telemetry_parser.py#L125-L154)
 
-### Graph Name Mapping and Validation
-- Loads a JSON mapping to translate internal graph identifiers to canonical sensor names.
-- Validates presence and non-empty series before inclusion.
+### Enhanced Graph Name Mapping and Validation
+**Updated** The graph mapper has been significantly enhanced to fix a critical contract break between the visual telemetry extractor and mapping system. The enhanced implementation now properly handles both legacy `Graph_X_Y` keys and direct canonical signal names.
 
-Use cases:
-- Standardize outputs from different extractors.
-- Prepare consistent keys for downstream storage and analysis.
+Key improvements:
+- **Dual Key Support**: Accepts both legacy format (`Graph_5_1`, `Graph_6_2`) and canonical names (`Steering`, `Brake Pad`)
+- **Contract Fix**: Resolves the issue where visual extractors emitting canonical names were being discarded
+- **Idempotent Processing**: Ensures consistent behavior regardless of input format
+- **Robust Fallback**: Maintains backward compatibility while supporting modern canonical naming
+
+Processing rules:
+1. Direct canonical signals are preserved without modification
+2. Legacy `Graph_X_Y` keys are mapped via `mapeo.json` configuration
+3. Unknown or non-canonical keys are safely discarded with logging
+4. Duplicate signals keep the longest series for optimal data quality
+
+```mermaid
+flowchart TD
+Input["Raw Graph Keys"] --> Check{"Is Canonical Signal?"}
+Check -- Yes --> Preserve["Preserve Directly"]
+Check -- No --> Legacy{"Is Legacy Graph_X_Y?"}
+Legacy -- Yes --> Map["Map via mapeo.json"]
+Legacy -- No --> Discard["Discard Non-Canonical"]
+Map --> Merge["Merge Results"]
+Preserve --> Merge
+Discard --> Merge
+Merge --> Output["Mapped Telemetry Dict"]
+```
+
+**Diagram sources**
+- [graph_mapper.py:60-92](file://core/graph_mapper.py#L60-L92)
+- [mapeo.json:1-27](file://mapeo.json#L1-L27)
 
 **Section sources**
-- [graph_mapper.py:1-31](file://core/graph_mapper.py#L1-L31)
+- [graph_mapper.py:1-92](file://core/graph_mapper.py#L1-L92)
 - [mapeo.json:1-27](file://mapeo.json#L1-L27)
 
 ### Data Storage and Retrieval
@@ -257,7 +291,7 @@ Data model highlights:
 - Aggregates into a comprehensive analysis result for a session.
 
 Quality assessment:
-- Coverage analysis measures how much of the total session duration is covered by each sensor’s last timestamp.
+- Coverage analysis measures how much of the total session duration is covered by each sensor's last timestamp.
 
 ```mermaid
 flowchart TD
@@ -279,12 +313,12 @@ Profile --> Out(["Analysis result"])
 ```
 
 **Diagram sources**
-- [behavior_analyzer.py:95-167](file://core/behavior_analyzer.py#L95-L167)
-- [behavior_analyzer.py:170-205](file://core/behavior_analyzer.py#L170-L205)
+- [behavior_analyzer.py:95-167](file://core/behavior_analyzer.py#L95-167)
+- [behavior_analyzer.py:170-205](file://core/behavior_analyzer.py#L170-205)
 
 **Section sources**
-- [behavior_analyzer.py:95-167](file://core/behavior_analyzer.py#L95-L167)
-- [behavior_analyzer.py:170-205](file://core/behavior_analyzer.py#L170-L205)
+- [behavior_analyzer.py:95-167](file://core/behavior_analyzer.py#L95-167)
+- [behavior_analyzer.py:170-205](file://core/behavior_analyzer.py#L170-205)
 
 ### Visualization and Reporting
 - Plotting module renders telemetry time series into UI frames with dark theme styling.
@@ -307,33 +341,35 @@ Integration points:
 - [training_path.py:24-86](file://core/training_path.py#L24-L86)
 
 ## Dependency Analysis
-High-level dependencies among core modules:
+High-level dependencies among core modules with enhanced graph mapper integration:
 
 ```mermaid
 graph LR
 PDF["pdf_parser.py"] --> DB["db_manager.py"]
-EX["telemetry_extractor.py"] --> MAP["graph_mapper.py"]
+EX["telemetry_extractor.py"] --> MAP["enhanced graph_mapper.py"]
 PAR["telemetry_parser.py"] --> MAP
 MAP --> DB
 DB --> BA["behavior_analyzer.py"]
 BA --> TM["training_manager.py"]
 BA --> PL["plotter.py"]
 BA --> RG["report_generator.py"]
+PIPE["pipeline.py"] --> MAP
 ```
 
 **Diagram sources**
 - [pdf_parser.py:27-57](file://core/pdf_parser.py#L27-L57)
 - [telemetry_extractor.py:202-238](file://core/telemetry_extractor.py#L202-L238)
 - [telemetry_parser.py:125-154](file://core/telemetry_parser.py#L125-L154)
-- [graph_mapper.py:13-31](file://core/graph_mapper.py#L13-L31)
+- [graph_mapper.py:60-92](file://core/graph_mapper.py#L60-L92)
 - [db_manager.py:36-87](file://core/db_manager.py#L36-L87)
 - [behavior_analyzer.py:150-167](file://core/behavior_analyzer.py#L150-L167)
 - [training_manager.py:15-40](file://core/training_manager.py#L15-L40)
 - [plotter.py:15-69](file://core/plotter.py#L15-L69)
 - [report_generator.py:28-75](file://core/report_generator.py#L28-L75)
+- [pipeline.py:135-161](file://core/pipeline.py#L135-L161)
 
 **Section sources**
-- [graph_mapper.py:13-31](file://core/graph_mapper.py#L13-L31)
+- [graph_mapper.py:60-92](file://core/graph_mapper.py#L60-L92)
 - [db_manager.py:36-87](file://core/db_manager.py#L36-L87)
 - [behavior_analyzer.py:150-167](file://core/behavior_analyzer.py#L150-L167)
 
@@ -345,6 +381,10 @@ BA --> RG["report_generator.py"]
   - Adaptive binarization improves text recognition; consider caching OCR results per page to avoid reprocessing.
 - Calibration:
   - Ensure accurate pixel-to-real mappings; validate against known chart axes to minimize systematic errors.
+- **Enhanced Graph Mapping**:
+  - The dual-key support adds minimal overhead while providing significant flexibility
+  - Legacy mapping lookup is cached for performance
+  - Direct canonical signal preservation avoids unnecessary processing
 - Database:
   - Use indexes on foreign keys and frequently queried columns (already present for sessions and telemetry).
   - Batch inserts for event summaries and telemetry where possible.
@@ -354,13 +394,15 @@ BA --> RG["report_generator.py"]
 - Real-time streaming:
   - Current design is batch-oriented; for streaming, introduce a queue and incremental updates to the database and UI.
 
-[No sources needed since this section provides general guidance]
-
 ## Troubleshooting Guide
 Common issues and resolutions:
 - Missing or empty telemetry series:
   - Verify that the PDF contains the expected images on specified pages and that color masks match the plotted line colors.
   - Check OCR results and fallback heuristics for correct sensor naming.
+- **Enhanced Graph Mapping Issues**:
+  - If canonical signals are still not appearing, verify that the visual extractor is outputting proper canonical names
+  - Check that legacy `Graph_X_Y` keys are properly defined in `mapeo.json`
+  - Review debug logs for discarded non-canonical keys
 - Misaligned timestamps:
   - Confirm total session duration matches the actual chart x-axis range.
   - Validate pixel-to-time scaling parameters in the configuration or calibration functions.
@@ -374,13 +416,12 @@ Common issues and resolutions:
 - [telemetry_extractor.py:58-92](file://core/telemetry_extractor.py#L58-L92)
 - [telemetry_extractor.py:104-131](file://core/telemetry_extractor.py#L104-L131)
 - [telemetry_parser.py:81-123](file://core/telemetry_parser.py#L81-L123)
+- [graph_mapper.py:60-92](file://core/graph_mapper.py#L60-L92)
 - [db_manager.py:140-151](file://core/db_manager.py#L140-L151)
 - [plotter.py:38-69](file://core/plotter.py#L38-L69)
 
 ## Conclusion
-The telemetry processing system provides a robust pipeline to convert PDF-based training reports into structured, analyzable time-series data. It supports dual extraction strategies (OCR-based and config-driven), standardizes sensor names, persists data efficiently, and computes actionable metrics for operator behavior analysis. Visualization and reporting tools complete the workflow, enabling both interactive exploration and formal documentation. Future enhancements can focus on streaming support, advanced compression, and adaptive calibration tuning for improved accuracy at scale.
-
-[No sources needed since this section summarizes without analyzing specific files]
+The telemetry processing system provides a robust pipeline to convert PDF-based training reports into structured, analyzable time-series data. The recent enhancement to the graph mapper resolves a critical contract break between the visual telemetry extractor and mapping system, now properly handling both legacy `Graph_X_Y` keys and canonical signal names like 'Steering' and 'Brake Pad'. This improvement ensures reliable data flow through the entire pipeline while maintaining backward compatibility. The system supports dual extraction strategies (OCR-based and config-driven), standardizes sensor names, persists data efficiently, and computes actionable metrics for operator behavior analysis. Visualization and reporting tools complete the workflow, enabling both interactive exploration and formal documentation. Future enhancements can focus on streaming support, advanced compression, and adaptive calibration tuning for improved accuracy at scale.
 
 ## Appendices
 
@@ -395,7 +436,7 @@ The telemetry processing system provides a robust pipeline to convert PDF-based 
 These ranges inform calibration and quality checks during extraction.
 
 **Section sources**
-- [telemetry_extractor.py:12-19](file://core/telemetry_extractor.py#L12-L19)
+- [telemetry_extractor.py:27-34](file://core/telemetry_extractor.py#L27-L34)
 - [telemetry_parser.py:16-72](file://core/telemetry_parser.py#L16-L72)
 
 ### Example Custom Parsers and Transformations
@@ -404,7 +445,36 @@ These ranges inform calibration and quality checks during extraction.
 
 **Section sources**
 - [telemetry_parser.py:16-72](file://core/telemetry_parser.py#L16-L72)
-- [graph_mapper.py:13-31](file://core/graph_mapper.py#L13-L31)
+- [graph_mapper.py:60-92](file://core/graph_mapper.py#L60-L92)
 - [db_manager.py:106-151](file://core/db_manager.py#L106-L151)
 - [behavior_analyzer.py:150-167](file://core/behavior_analyzer.py#L150-L167)
 - [plotter.py:15-69](file://core/plotter.py#L15-L69)
+
+### Enhanced Graph Mapper Usage Examples
+The enhanced graph mapper supports seamless integration with both legacy and modern telemetry extraction methods:
+
+```python
+# Example usage showing both legacy and canonical key handling
+from core.graph_mapper import map_graphs
+
+# Legacy format (backward compatible)
+legacy_data = {
+    "Graph_5_1": [(0.0, 1.5), (1.0, 2.3)],  # Maps to "Steering"
+    "Graph_6_2": [(0.0, 0.5), (1.0, 0.8)]   # Maps to "Speed In Km/h"
+}
+
+# Modern format (direct canonical names)
+modern_data = {
+    "Steering": [(0.0, 1.5), (1.0, 2.3)],
+    "Brake Pad": [(0.0, 0.5), (1.0, 0.8)]
+}
+
+# Both formats work identically
+mapped_legacy = map_graphs(legacy_data)
+mapped_modern = map_graphs(modern_data)
+```
+
+**Section sources**
+- [graph_mapper.py:60-92](file://core/graph_mapper.py#L60-L92)
+- [test_mapper.py:1-21](file://test_mapper.py#L1-L21)
+- [pipeline.py:135-161](file://core/pipeline.py#L135-L161)
