@@ -1,6 +1,6 @@
 ---
 kind: configuration_system
-name: Hardcoded and File-Based Configuration for Telemetry Extraction, Manifests, and Database
+name: Hardcoded and File-Based Configuration for Telemetry Extraction, Manifests.md
 category: configuration_system
 scope:
     - '**'
