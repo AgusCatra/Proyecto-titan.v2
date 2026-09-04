@@ -20,6 +20,9 @@ CREATE TABLE Sesiones (
     fecha_hora_inicio TEXT,
     duracion_segundos INTEGER,
     puntaje_final REAL,
+    -- Reglas de negocio (opcionales; BD antiguas pueden no tenerlas):
+    puntaje_depurado REAL,          -- puntaje final sin el falso error de horquilla
+    checklist_completado INTEGER,   -- 1 si hubo PrechecksViolation (checklist inicial)
     perfil_operador TEXT,
     fecha_carga TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

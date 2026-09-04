@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import sqlite3
 from typing import Any, Dict, List, Optional, Tuple
@@ -40,7 +41,7 @@ from .db_manager import (
 )
 from .telemetry_extractor import extraer_telemetria_visual
 from .telemetry_parser import extraer_toda_la_telemetria
-from .graph_mapper import map_graphs
+from .graph_mapper import CANONICAL_SIGNALS, map_graphs
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,63 @@ PROFILE_SOURCE_MODEL = "model"   # Predicción mediante el modelo ML (joblib)
 PROFILE_SOURCE_NONE = "none"     # Sin asignación de perfil
 ENGINE_VISUAL = "visual"         # core.telemetry_extractor (agnóstico de layout)
 ENGINE_PARSER = "parser"         # core.telemetry_parser (config-driven, páginas fijas)
+
+# --- Reglas de negocio (marcadores de eventos normalizados) ------------------
+_PRECHECK_MARKER = "prechecksviolation"   # checklist inicial (no vicio dinámico)
+_FORK_MARKER = "minimumforkheight"        # falso error de horquilla en piso
+
+
+def _norm_event_type(value: Any) -> str:
+    """Normaliza un tipo de evento a minúsculas sin separadores ni símbolos."""
+    return re.sub(r"[^a-z0-9]+", "", str(value).lower())
+
+
+def _aplicar_reglas_de_negocio(parsed_data: Dict[str, Any]) -> None:
+    """Calcula ``puntaje_depurado`` y ``checklist_completado`` sobre session_data.
+
+    3.1 Falso error de horquilla: si existe el evento ``Minimum Fork Height(mtrs)``
+        penalizado al inicio (operación segura en piso), se reintegra ese descuento
+        al puntaje para obtener ``puntaje_depurado = puntaje_original + |penalty|``.
+    3.2 Checklist inicial: la presencia de ``PrechecksViolation`` marca
+        ``checklist_completado = True`` (son prechequeos, no vicios dinámicos).
+    """
+    session = parsed_data.get("session_data") or {}
+    events = parsed_data.get("summary_events", []) or []
+    puntaje = float(session.get("puntaje_final", 0.0) or 0.0)
+
+    descuento_horquilla = 0.0
+    for ev in events:
+        if _FORK_MARKER in _norm_event_type(ev.get("type", "")):
+            descuento_horquilla += abs(float(ev.get("penalties", 0.0) or 0.0))
+    session["puntaje_depurado"] = round(puntaje + descuento_horquilla, 2)
+
+    session["checklist_completado"] = any(
+        _PRECHECK_MARKER in _norm_event_type(ev.get("type", "")) for ev in events
+    )
+    parsed_data["session_data"] = session
+
+
+def _completar_senales_ausentes(
+    telemetry: Dict[str, List[Tuple[float, float]]],
+    duration: Any,
+) -> None:
+    """3.3 Rellena con un vector continuo en 0.0 las señales canónicas ausentes.
+
+    Si tras procesar todas las páginas una señal canónica no aparece (p. ej. el
+    alumno jamás tocó el freno), se inicializa en 0.0 con la misma longitud y rango
+    temporal que las demás señales, sin romper la ejecución.
+    """
+    presentes = [v for v in telemetry.values() if v]
+    ref_len = max((len(v) for v in presentes), default=0)
+    if ref_len <= 0:
+        ref_len = max(2, int(duration or 0) or 2)
+    span = float(duration or 0)
+    step = span / (ref_len - 1) if ref_len > 1 else 0.0
+    for signal in CANONICAL_SIGNALS:
+        if telemetry.get(signal):
+            continue
+        telemetry[signal] = [(round(i * step, 2), 0.0) for i in range(ref_len)]
+        logger.info("Señal canónica ausente, se inicializa en 0.0: %s", signal)
 
 
 def _preparar_datos_para_prediccion(parsed_data: Dict[str, Any], feature_names: Any) -> pd.DataFrame:
@@ -73,10 +131,16 @@ def _preparar_datos_para_prediccion(parsed_data: Dict[str, Any], feature_names: 
         "duracion_segundos": float(session_data.get("duracion_segundos", 0) or 0),
     }
     for event in parsed_data.get("summary_events", []) or []:
-        ev_type = str(event.get("type", "")).replace(" ", "_")
-        if ev_type:
-            data[f"conteo_eventos_{ev_type}"] = float(event.get("total_events", 0) or 0)
-            data[f"penalizaciones_{ev_type}"] = float(event.get("penalties", 0) or 0)
+        raw_type = str(event.get("type", ""))
+        ev_type = raw_type.replace(" ", "_")
+        if not ev_type:
+            continue
+        # Los PrechecksViolation corresponden al checklist inicial, no a vicios
+        # dinámicos de manejo: se excluyen del conteo de violaciones dinámicas.
+        if _PRECHECK_MARKER in _norm_event_type(raw_type):
+            continue
+        data[f"conteo_eventos_{ev_type}"] = float(event.get("total_events", 0) or 0)
+        data[f"penalizaciones_{ev_type}"] = float(event.get("penalties", 0) or 0)
 
     # Sin nombres de características conocidos -> usar las columnas disponibles.
     if feature_names is None or (hasattr(feature_names, "__len__") and len(feature_names) == 0):
@@ -86,12 +150,16 @@ def _preparar_datos_para_prediccion(parsed_data: Dict[str, Any], feature_names: 
     if not isinstance(feature_names, list):
         feature_names = list(feature_names)
 
-    df = pd.DataFrame(columns=feature_names)
-    df.loc[0] = 0  # Fila inicializada en ceros.
+    # Se acumulan las características en un dict estándar y se materializa UNA
+    # sola vez como DataFrame float (columnas en el orden del modelo). Esto evita
+    # la asignación celda-a-celda ``df.at[0, key] = value`` sobre columnas creadas
+    # implícitamente como int64, que disparaba el FutureWarning de Pandas; el
+    # DataFrame resultante soporta decimales positivos y negativos sin avisos.
+    features: Dict[str, float] = {name: 0.0 for name in feature_names}
     for key, value in data.items():
-        if key in df.columns:
-            df.at[0, key] = value
-    return df.fillna(0)
+        if key in features:
+            features[key] = float(value)
+    return pd.DataFrame([features])
 
 
 def _resolve_profile(
@@ -250,6 +318,8 @@ def process_simulator_pdf(
             )
             logger.error("parse_pdf_report devolvió None para %s", file_name)
             return result
+        # --- 1.b) Reglas de negocio sobre los metadatos parseados ---
+        _aplicar_reglas_de_negocio(parsed_data)
         result["metadata"] = parsed_data.get("session_data")
 
         # --- 2) Perfil del operador ---
@@ -259,6 +329,8 @@ def process_simulator_pdf(
         # --- 3) Telemetría (best-effort, fuera de la transacción de escritura) ---
         duration = (parsed_data.get("session_data") or {}).get("duracion_segundos") or 0
         telemetry = _extract_telemetry(pdf_path, duration, engine, errors)
+        # 3.3 Las señales canónicas no extraídas se inicializan en 0.0.
+        _completar_senales_ausentes(telemetry, duration)
 
         # --- 4) Inserción transaccional con rollback seguro ---
         try:
