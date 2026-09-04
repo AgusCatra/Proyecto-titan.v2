@@ -1,5 +1,6 @@
 # core/telemetry_extractor.py
 # Extracción automática de gráficos de telemetría desde reportes PDF
+import logging
 import os
 from typing import Dict, List, Optional, Tuple
 
@@ -7,6 +8,20 @@ import cv2
 import numpy as np
 import pypdfium2 as pdfium
 import pytesseract
+
+from .graph_mapper import CANONICAL_SIGNALS, normalize_telemetry
+
+logger = logging.getLogger(__name__)
+
+# --- Punto 6-G: efectos secundarios en disco -------------------------------
+# En False (por defecto) NO se escriben imágenes intermedias de depuración
+# (overlays / máscaras / recortes) en debug_outputs/ en cada ejecución.
+DEBUG_EXPORT_IMAGES = False
+
+# Directorio de imágenes de depuración (solo se usa si DEBUG_EXPORT_IMAGES=True).
+DEBUG_OUTPUT_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "debug_outputs"
+)
 
 # Rangos reales por nombre oficial
 Y_RANGES = {
@@ -83,12 +98,15 @@ def _find_chart_candidates(page_bgr: np.ndarray, page_idx: int, dbg_dir: str):
         rects.append((x0, y0, ww, hh))
 
     rects = _dedup_rects(rects)
-    overlay = page_bgr.copy()
-    for i, (x, y, ww, hh) in enumerate(rects):
-        cv2.rectangle(overlay, (x, y), (x + ww, y + hh), (0, 0, 255), 3)
-        crop = page_bgr[y:y + hh, x:x + ww]
-        cv2.imwrite(f"{dbg_dir}/page{page_idx+1}_cand{i+1}_crop.png", crop)
-    cv2.imwrite(f"{dbg_dir}/page{page_idx+1}_overlay.png", overlay)
+    # Punto 6-G: solo escribir imágenes de depuración si está explícitamente habilitado.
+    if DEBUG_EXPORT_IMAGES:
+        _ensure_dir(dbg_dir)
+        overlay = page_bgr.copy()
+        for i, (x, y, ww, hh) in enumerate(rects):
+            cv2.rectangle(overlay, (x, y), (x + ww, y + hh), (0, 0, 255), 3)
+            crop = page_bgr[y:y + hh, x:x + ww]
+            cv2.imwrite(f"{dbg_dir}/page{page_idx+1}_cand{i+1}_crop.png", crop)
+        cv2.imwrite(f"{dbg_dir}/page{page_idx+1}_overlay.png", overlay)
     return rects
 
 
@@ -199,9 +217,22 @@ def _fallback_assign(name: str, series: List[Tuple[float, float]]) -> str:
 
 
 # -------------------- FUNCIÓN PRINCIPAL --------------------
-def extraer_telemetria_visual(ruta_pdf: str, duracion_total_segundos: int):
-    dbg_dir = "debug_outputs"
-    _ensure_dir(dbg_dir)
+def extraer_telemetria_visual(
+    ruta_pdf: str,
+    duracion_total_segundos: int,
+    only_canonical: bool = True,
+) -> Dict[str, List[Tuple[float, float]]]:
+    """Extrae las curvas de telemetría de un PDF mediante visión artificial.
+
+    Devuelve ``{nombre_señal: [(t, v), ...]}``. Con ``only_canonical=True``
+    (por defecto) la salida se normaliza a las 6 señales canónicas
+    (``CANONICAL_SIGNALS``), descartando claves sin identificar como
+    ``"Unknown_<página>_<cand>"``. Esto garantiza el contrato de telemetría que
+    consumen ``core.pipeline`` y la tabla ``Telemetria`` de la base de datos.
+    """
+    dbg_dir = DEBUG_OUTPUT_DIR
+    if DEBUG_EXPORT_IMAGES:
+        _ensure_dir(dbg_dir)
     results: Dict[str, Optional[List[Tuple[float, float]]]] = {}
 
     pdf = pdfium.PdfDocument(ruta_pdf)
@@ -232,7 +263,10 @@ def extraer_telemetria_visual(ruta_pdf: str, duracion_total_segundos: int):
             else:
                 results[name] = series
 
-            # DEBUG log
-            print(f"[Page {i+1} | Cand {j+1}] → {name} ({len(series)} puntos)")
+            logger.debug("[Página %s | Cand %s] -> %s (%s puntos)", i + 1, j + 1, name, len(series))
+
+    if only_canonical:
+        # Contrato de telemetría (§6-A): emitir directamente las señales canónicas.
+        results = normalize_telemetry(results)
 
     return results

@@ -1,16 +1,43 @@
-Fragmento de código
-
-# Entorno Virtual
+# --- Entorno virtual ---
 .venv/
 venv/
 env/
+ENV/
 
-# Archivos de caché de Python
+# --- Caché de Python ---
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*$py.class
+*.so
 
-# Configuración del editor
+# --- Distribución / packaging ---
+build/
+dist/
+*.egg-info/
+
+# --- Configuración del editor / IDE ---
 .vscode/
 .idea/
+
+# --- Proyecto Titán: artefactos generados (no versionar) ---
+# Imágenes de depuración de visión artificial (overlays / máscaras / recortes)
+debug_outputs/
+# PDFs procesados y reportes generados
+data/exports/
+# Bases de datos SQLite (incluye database/titan.db) y backups
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+# Wiki / knowledge autogenerado por tooling
+.qoder/
+
+# --- Variables de entorno y secretos ---
+.env
+.env.*
+!.env.example
+
+# --- Artefactos de pruebas / cobertura ---
+.pytest_cache/
+.coverage
+htmlcov/

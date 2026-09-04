@@ -2,7 +2,6 @@ import traceback
 import streamlit as st
 import os
 import sys
-import shutil
 import tempfile
 import sqlite3
 import io
@@ -15,18 +14,11 @@ if project_root not in sys.path:
 
 # --- Importaciones ---
 from core.analizador_eventos import generar_feedback, extraer_eventos_crudos
-from core.pdf_parser import parse_pdf_report
-from core.telemetry_extractor import extraer_telemetria_visual
-from core.graph_mapper import map_graphs   # NUEVO
-from core.db_manager import (
-    get_db_connection, insert_session, insert_summary_events,
-    get_session_id_by_filename, insert_telemetry_data, get_telemetry_for_graph
-)
+from core.pipeline import process_simulator_pdf
+from core.db_manager import get_db_connection, get_telemetry_for_graph
 from core.reporter import generar_texto_reporte_individual, generar_reporte_evolucion
 from core.behavior_analyzer import analizar_comportamiento_completo
 from core.report_generator import crear_reporte_pdf, crear_reporte_evolucion_pdf
-import joblib
-import pandas as pd
 import matplotlib.pyplot as plt
 
 # --- Configuración ---
@@ -51,63 +43,33 @@ RUTAS_DE_APRENDIZAJE = {
 # FUNCIONES AUXILIARES
 # =============================================================================
 
-def _preparar_datos_para_prediccion(parsed_data, feature_names: List[str]):
-    """Convierte datos parseados en DataFrame compatible con el modelo ML."""
-    data = {
-        'puntaje_final': parsed_data['session_data'].get('puntaje_final', 0.0),
-        'duracion_segundos': parsed_data['session_data'].get('duracion_segundos', 0)
-    }
-    for event in parsed_data.get('summary_events', []):
-        ev_type = event.get('type', '').replace(' ', '_')
-        if ev_type:
-            data[f"conteo_eventos_{ev_type}"] = float(event.get('total_events', 0))
-            data[f"penalizaciones_{ev_type}"] = float(event.get('penalties', 0))
+def _procesar_reporte(pdf_path: str) -> Optional[int]:
+    """Adapter fino de UI: delega 100% en ``core.pipeline.process_simulator_pdf``.
 
-    df = pd.DataFrame([data], columns=feature_names).fillna(0)
-    return df
+    Toda la lógica ETL (parseo, perfil, telemetría, transacción y rollback) vive
+    en el pipeline headless. Aquí únicamente se traducen a la UI los resultados y
+    los errores controlados que devuelve el pipeline.
+    """
+    resultado = process_simulator_pdf(
+        pdf_path,
+        profile_source="model",
+        db_path=DB_PATH,
+        models_path=MODELS_PATH,
+        exports_dir=EXPORTS_DIR,
+    )
 
-def _procesar_y_obtener_id(pdf_path: str) -> Optional[int]:
-    """Procesa el PDF, extrae datos + telemetría y guarda todo en BD."""
-    file_name = os.path.basename(pdf_path)
-    with get_db_connection(DB_PATH) as conn:
-        session_id = get_session_id_by_filename(conn, file_name)
-        if session_id:
-            return session_id
+    for err in resultado.get("errors", []):
+        st.error(f"⚠️ {err}")
 
-        parsed_data = parse_pdf_report(pdf_path)
-        if not parsed_data:
-            st.error("❌ No se pudieron extraer datos del PDF.")
-            return None
+    if resultado.get("cached"):
+        st.info("ℹ️ Este reporte ya estaba procesado; se reutilizó la sesión existente.")
+    elif resultado.get("telemetry_loaded"):
+        total = sum(resultado["telemetry_loaded"].values())
+        st.success(
+            f"✅ Telemetría guardada: {len(resultado['telemetry_loaded'])} señal(es), {total} puntos."
+        )
 
-        # Cargar modelo ML
-        try:
-            modelo = joblib.load(MODELS_PATH)
-        except FileNotFoundError:
-            st.error(f"⚠️ Modelo no encontrado en '{MODELS_PATH}'.")
-            return None
-
-        df_pred = _preparar_datos_para_prediccion(parsed_data, getattr(modelo, "feature_names_in_", []))
-        perfil = modelo.predict(df_pred)[0]
-
-        # Guardar en BD
-        conn.execute("BEGIN")
-        new_id = insert_session(conn, parsed_data, perfil)
-        if not new_id:
-            conn.rollback()
-            return None
-
-        insert_summary_events(conn, new_id, parsed_data['summary_events'])
-
-        # Telemetría → extraer + mapear nombres correctos
-        telemetria_raw = extraer_telemetria_visual(pdf_path, parsed_data['session_data']['duracion_segundos'])
-        telemetria = map_graphs(telemetria_raw)
-        for nombre, datos in telemetria.items():
-            if datos:
-                insert_telemetry_data(conn, new_id, nombre, datos)
-
-        conn.commit()
-        shutil.copy2(pdf_path, os.path.join(EXPORTS_DIR, file_name))
-        return new_id
+    return resultado.get("session_id")
 
 def _plot_telemetry_chart(datos: List[Tuple], titulo: str):
     """Dibuja un gráfico bonito en Streamlit."""
@@ -152,7 +114,7 @@ if individual_file:
         tmp.write(individual_file.getvalue())
         tmp_path = tmp.name
     try:
-        session_id = _procesar_y_obtener_id(tmp_path)
+        session_id = _procesar_reporte(tmp_path)
         if session_id:
             with get_db_connection(DB_PATH) as conn:
                 conn.row_factory = sqlite3.Row
@@ -191,8 +153,8 @@ elif compare_button:
             tmp1.write(initial_file.getvalue()); tmp1_path = tmp1.name
             tmp2.write(final_file.getvalue()); tmp2_path = tmp2.name
         try:
-            id_inicial = _procesar_y_obtener_id(tmp1_path)
-            id_final = _procesar_y_obtener_id(tmp2_path)
+            id_inicial = _procesar_reporte(tmp1_path)
+            id_final = _procesar_reporte(tmp2_path)
             if id_inicial and id_final:
                 reporte_comp = generar_reporte_evolucion(id_inicial, id_final)
                 st.subheader("📊 Comparación de reportes")

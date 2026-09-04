@@ -4,7 +4,6 @@
 
 import os
 import sys
-import shutil
 import traceback
 import sqlite3
 from typing import Optional, Dict, Any, List
@@ -13,10 +12,6 @@ from typing import Optional, Dict, Any, List
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 import tkinter as tk
-
-# --- Data / ML ---
-import joblib
-import pandas as pd
 
 # --- Imaging for icons ---
 from PIL import Image, ImageDraw
@@ -30,12 +25,8 @@ sys.path.append(project_root)
 # =========================
 # Importaciones internas
 # =========================
-from core.pdf_parser import parse_pdf_report
-from core.db_manager import (
-    get_db_connection, insert_session, insert_summary_events,
-    get_session_id_by_filename, insert_telemetry_data, get_telemetry_for_graph
-)
-from core.telemetry_parser import extraer_toda_la_telemetria
+from core.db_manager import get_db_connection, get_telemetry_for_graph
+from core.pipeline import process_simulator_pdf
 from core.reporter import generar_reporte_evolucion, generar_texto_reporte_individual
 from core.behavior_analyzer import analizar_comportamiento_completo
 from core.report_generator import crear_reporte_pdf
@@ -512,61 +503,32 @@ class TitanApp:
             self.loader.close()
 
     def _procesar_y_obtener_id(self, pdf_path: str) -> Optional[int]:
-        file_name = os.path.basename(pdf_path)
-        with get_db_connection(self.DB_PATH) as conn:
-            session_id = get_session_id_by_filename(conn, file_name)
-            if session_id:
-                dst = os.path.join(self.EXPORTS_DIR, file_name)
-                if not os.path.exists(dst): shutil.copy2(pdf_path, dst)
-                return session_id
+        """Adapter fino de UI: delega 100% en ``core.pipeline.process_simulator_pdf``.
 
-            parsed_data = parse_pdf_report(pdf_path)
-            if not parsed_data: return None
+        La lógica ETL (parseo, perfil ML, extracción de telemetría, transacción y
+        rollback) ya no vive en la app de escritorio: se centralizó en el pipeline
+        headless para eliminar la duplicación/divergencia con ``streamlit_app.py``
+        (§6-B). Esta función solo traduce el resultado a la UI.
+        """
+        resultado = process_simulator_pdf(
+            pdf_path,
+            profile_source="model",
+            db_path=self.DB_PATH,
+            exports_dir=self.EXPORTS_DIR,
+        )
 
-            model_path = os.path.join(project_root, 'models', 'modelo_clasificador.joblib')
-            try:
-                modelo = joblib.load(model_path)
-            except FileNotFoundError:
-                self._error_ui("Error Crítico", f"No se encontró el archivo del modelo de Machine Learning en:\n{model_path}\n\nAsegurate de que el archivo 'modelo_clasificador.joblib' esté en la carpeta 'models'.")
-                return None
+        errores = resultado.get("errors") or []
+        session_id = resultado.get("session_id")
 
-            df_pred = self._preparar_datos_para_prediccion(parsed_data, getattr(modelo, "feature_names_in_", []))
-            perfil = modelo.predict(df_pred)[0]
+        if errores:
+            self._error_ui(
+                "Error al procesar el reporte",
+                "\n".join(f"- {e}" for e in errores),
+            )
+        elif session_id is None:
+            self._error_ui("Error al procesar", "No se pudo obtener un id de sesión válido.")
 
-            conn.execute("BEGIN")
-            new_id = insert_session(conn, parsed_data, perfil)
-            if not new_id: conn.rollback(); return None
-
-            insert_summary_events(conn, new_id, parsed_data['summary_events'])
-            telemetria = extraer_toda_la_telemetria(pdf_path, parsed_data['session_data']['duracion_segundos'])
-            for nombre, datos in telemetria.items():
-                if datos: insert_telemetry_data(conn, new_id, nombre, datos)
-            conn.commit()
-
-            shutil.copy2(pdf_path, os.path.join(self.EXPORTS_DIR, file_name))
-            return new_id
-
-    def _preparar_datos_para_prediccion(self, parsed_data, feature_names: List[str]):
-        data = {'puntaje_final': parsed_data['session_data']['puntaje_final'], 'duracion_segundos': parsed_data['session_data']['duracion_segundos']}
-        for event in parsed_data['summary_events']:
-            ev_type = event['type'].replace(' ', '_')
-            data[f"conteo_eventos_{ev_type}"] = float(event.get('total_events', 0))
-            data[f"penalizaciones_{ev_type}"] = float(event.get('penalties', 0))
-        
-        # Estrategia segura: crear un DF con todas las columnas esperadas y luego rellenar.
-        if feature_names is None or (hasattr(feature_names, "__len__") and len(feature_names) == 0):
-         return pd.DataFrame([data]).fillna(0)
-        # Convertir a lista si viene como ndarray (NumPy)
-        if not isinstance(feature_names, list):
-            feature_names = list(feature_names)
-            
-        df = pd.DataFrame(columns=feature_names)
-        df.loc[0] = 0 # Inicializar una fila con ceros
-        for key, value in data.items():
-            if key in df.columns:
-                df.at[0, key] = value
-        
-        return df.fillna(0)
+        return session_id
 
     def _error_ui(self, titulo, detalle):
         self.results.clear_panels()
