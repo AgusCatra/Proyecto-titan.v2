@@ -126,11 +126,11 @@ def crear_reporte_evolucion_pdf(datos_iniciales: Dict, datos_finales: Dict, ruta
         delta = v_final - v_inicial
         sign = '+' if delta >= 0 else ''
         if is_score:
-            arrow = "▲" if delta > 0 else "▼" if delta < 0 else " "
+            arrow = "(+)" if delta > 0 else "(-)" if delta < 0 else " "
             if delta > 0: pdf.set_text_color(0, 128, 0)
             elif delta < 0: pdf.set_text_color(255, 0, 0)
         else:
-            arrow = "▼" if delta < 0 else "▲" if delta > 0 else " "
+            arrow = "(-)" if delta < 0 else "(+)" if delta > 0 else " "
             if delta < 0: pdf.set_text_color(0, 128, 0)
             elif delta > 0: pdf.set_text_color(255, 0, 0)
         if delta == 0:
