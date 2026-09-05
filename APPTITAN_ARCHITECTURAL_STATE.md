@@ -1,33 +1,36 @@
 # AppTitan — Architectural State Document
 
-> **Purpose:** Frozen, evidence-based snapshot of the AppTitan (Proyecto Titán v2) codebase, produced for downstream consumption by a Software Architect agent that will plan AppTitan's integration as a **microservice** inside the **SimuTwin** platform.
+> **Purpose:** Evidence-based snapshot of the AppTitan (Proyecto Titán v2) codebase, produced for downstream consumption by a Software Architect agent that will plan AppTitan's integration as a **microservice** inside the **SimuTwin** platform.
 > **Audience:** An LLM acting as Software Architect. Prefer facts, file paths, and severity over prose.
-> **Method:** Static analysis of 100% of first-party Python sources (`core/`, entry scripts, config), the SQL DDL, the live SQLite database, and `requirements.txt`. No assumptions were made where code could be read.
+> **Method:** Static analysis of 100% of first-party Python sources (`core/`, `ui/`, entry scripts, `tests/`, config), the SQL DDL, the live SQLite database, and `requirements.txt`. No assumptions were made where code could be read.
 > **Repository state:** Single-package Python monorepo, no build system, no API layer, no containerization, no CI.
+> **Revision:** Updated after the completed cleanup/decoupling refactor — dead modules and root debug scripts deleted, `core/plotter.py` migrated to the new `ui/` package, ETL orchestration unified in `core/pipeline.py`, `PyMuPDF` dropped, and a formal pytest suite added under `tests/`. Sections that were resolved by this refactor are marked **✅ RESOLVED**.
 
 ---
 
 ## 0. Executive Summary
 
-AppTitan is a **desktop/batch analytics tool** — not a service. It ingests forklift-simulator PDF reports, extracts session metadata + telemetry curves, classifies the operator into a behavior profile, and renders text/PDF/chart output through **two independent frontends** (CustomTkinter desktop and Streamlit web) that share a `core/` package and a local SQLite file.
+AppTitan is a **desktop/batch analytics tool** — not a service. It ingests forklift-simulator PDF reports, extracts session metadata + telemetry curves, classifies the operator into a behavior profile, and renders text/PDF/chart output through **two independent frontends** (CustomTkinter desktop and Streamlit web) that share a UI-agnostic `core/` package and a local SQLite file.
 
-**Readiness verdict for microservice extraction: LOW (needs a refactor pass first).**
+> **Refactor status (this revision):** The cleanup/decoupling pass is **complete**. `core/` is now **100% UI-agnostic** (no GUI toolkit imports; enforced by an AST guard in `tests/test_arquitectura.py`), the desktop chart coupling moved to a new `ui/` package, the duplicated ETL orchestration was consolidated into `core/pipeline.py::process_simulator_pdf`, the orphaned `training_manager.py`/`training_path.py` and all root debug/ad-hoc scripts were deleted, `PyMuPDF` was dropped from `requirements.txt`, and a formal pytest suite now lives under `tests/`. `core/` is decoupled and **ready to be exposed as a REST API**; `streamlit_app.py` remains the active test bench.
+
+**Readiness verdict for microservice extraction: IMPROVED — domain core is now headless and REST-ready, but service/config/packaging layers are still absent.**
 
 | Dimension | Status | Note |
 |---|---|---|
-| Domain logic isolation (`core/`) | Partial | Logic is separated, but orchestration is duplicated in the frontends |
-| Service/API layer | Absent | No FastAPI/Flask/HTTP surface of any kind |
+| Domain logic isolation (`core/`) | **Good** | `core/` is UI-agnostic; shared orchestration now lives in `core/pipeline.py` and is consumed by both frontends |
+| Service/API layer | Absent | No FastAPI/Flask/HTTP surface yet, but `core/` can now be lifted headless |
 | Configuration management | Absent | Zero env vars; all paths, thresholds, page numbers hardcoded |
 | Persistence | SQLite file | Denormalized time-series stored as CSV-in-TEXT; destructive schema init |
 | Packaging / deploy | Absent | No Docker, no lockfile separation, no CI, undocumented OS dep (Tesseract) |
-| Test suite | Absent (nominal) | `test_*.py` are ad-hoc print scripts; no assertions, no pytest |
-| Observability | Absent | `print()`-based logging only; CV debug images written to disk on every run |
-| Correctness | At risk | Broken extractor→mapper contract; orphaned training module; ML collapses to 1 class |
+| Test suite | **Present (pytest)** | Formal suite under `tests/` (fixtures + assertions) incl. an AST architecture guard and a relocated ETL smoke test (`tests/test_pipeline_smoke.py`) |
+| Observability | Partial | `logging` adopted across `core/`; CV debug images now gated behind `DEBUG_EXPORT_IMAGES=False` |
+| Correctness | Improved | Orphaned training module removed; extractor→mapper contract normalized; single-class ML collapse remains a data concern |
 
-**Top 3 blockers to resolve before any integration work:**
+**Top remaining blockers to resolve before integration work:**
 1. **No service boundary / no config injection** — everything is hardcoded relative paths and a local file DB (§6-E, §6-H).
-2. **Broken telemetry contract** in the Streamlit path — `map_graphs` silently discards all extracted telemetry (§6-A).
-3. **Duplicated, divergent ETL orchestration** across the two frontends with two different extraction engines (§6-B).
+2. **Denormalized, non-queryable telemetry storage** and SQLite concurrency limits (§6-F, §6-J).
+3. **Degenerate ML model** — classifier still risks single-class collapse without a curated/balanced dataset (§6-I).
 
 ---
 
@@ -40,9 +43,11 @@ AppTitan is a **desktop/batch analytics tool** — not a service. It ingests for
 ### 1.2 Frontends (two, independent)
 | Framework | Version | Where | Role |
 |---|---|---|---|
-| **CustomTkinter** | 5.2.2 | `app.py`, `core/plotter.py` | Desktop GUI (`TitanApp` monolith) |
+| **CustomTkinter** | 5.2.2 | `app.py`, `ui/plotter.py` | Desktop GUI (`TitanApp` monolith) |
 | **Streamlit** | 1.49.1 | `streamlit_app.py` | Browser dashboard |
-| **Matplotlib** | 3.10.5 | `core/plotter.py`, `streamlit_app.py` | Telemetry charts (TkAgg backend on desktop) |
+| **Matplotlib** | 3.10.5 | `ui/plotter.py`, `streamlit_app.py` | Telemetry charts (TkAgg backend on desktop, confined to the `ui/` layer) |
+
+> **Layering note:** All GUI/TkAgg coupling now lives in the new `ui/` package (`ui/plotter.py`, v3.0, migrated from the former `core/plotter.py`). `core/` imports nothing from `ui/` and pulls in no GUI toolkit — this invariant is enforced by an AST-based guard in `tests/test_arquitectura.py`.
 
 ### 1.3 Data Processing & Machine Learning
 | Library | Version | Role |
@@ -55,17 +60,18 @@ AppTitan is a **desktop/batch analytics tool** — not a service. It ingests for
 | **pyarrow** | 21.0.0 | Transitive (Streamlit/pandas); not directly imported |
 
 ### 1.4 PDF Extraction, Computer Vision & OCR
-AppTitan uses **four** different PDF/imaging libraries — a redundancy hotspot:
+AppTitan uses **three** different PDF/imaging libraries in the production path (the redundant `PyMuPDF` dependency was removed — see note below):
 | Library | Version | Role | Used in |
 |---|---|---|---|
 | **pdfplumber** | 0.11.7 | Text + table extraction | `core/pdf_parser.py`, `core/telemetry_parser.py`, `core/analizador_eventos.py` |
 | **pdfminer.six** | 20250506 | Transitive backend of pdfplumber | (indirect) |
 | **pypdfium2** | 4.30.0 | Renders PDF pages to raster images | `core/telemetry_extractor.py` |
-| **PyMuPDF (fitz)** | 1.26.4 | PDF rendering | **Only** `debug_text_events.py` (not in the production pipeline) |
 | **fpdf2** | 2.8.3 | Generates output PDF reports | `core/report_generator.py` |
 | **opencv-python** | 4.12.0.88 | HSV color masking, contour detection, curve extraction | `core/telemetry_extractor.py`, `core/telemetry_parser.py` |
 | **pytesseract** | 0.3.13 | OCR of chart titles | `core/telemetry_extractor.py` |
 | **Pillow** | 11.3.0 | Icon/image handling | `app.py` |
+
+> **Removed dependency:** `PyMuPDF==1.26.4` was dropped from `requirements.txt`. Its only consumer was the root debug script `debug_text_events.py`, which was deleted in this refactor; it was never part of the production pipeline.
 
 > **Undeclared OS-level dependency:** `pytesseract` is only a wrapper — it requires the **Tesseract OCR binary** installed on the host. This is **not** captured in `requirements.txt` nor documented anywhere. It is a hard deployment blocker for the visual-extraction path.
 
@@ -75,8 +81,8 @@ AppTitan uses **four** different PDF/imaging libraries — a redundancy hotspot:
 ### 1.6 Notably Absent (relevant to SimuTwin)
 - **No web/API framework:** no FastAPI, Flask, or uvicorn anywhere (grep-confirmed). There is currently **no way to call AppTitan over a network**.
 - **No environment/config system:** zero uses of `os.environ` / `getenv` (grep-confirmed). No `.env`, no settings module, no secrets handling.
-- **No containerization/CI:** no `Dockerfile`, `docker-compose`, `*.yml/*.yaml`, `pyproject.toml`, `pytest.ini`, or `conftest.py` (glob-confirmed).
-- **`README.md` is empty.** `.gitignore` is minimal (venv, `__pycache__`, editor folders) and does **not** exclude `database/titan.db`, `models/`, `data/exports/`, or `debug_outputs/` — so generated artifacts and the live DB are version-controlled.
+- **No containerization/CI:** no `Dockerfile`, `docker-compose`, `*.yml/*.yaml`, `pyproject.toml`, or `pytest.ini` (glob-confirmed). A `tests/conftest.py` and a formal pytest suite now exist under `tests/`, but there is still no CI wiring.
+- **`README.md` is empty.** `.gitignore` now excludes the generated artifacts and the live DB (`debug_outputs/`, `data/exports/`, `*.db`/`*.sqlite`, `.qoder/`, `.pytest_cache/`, `.env`), so those are no longer version-controlled.
 
 ---
 
@@ -86,24 +92,28 @@ Irrelevant/generated noise (`.git`, `__pycache__`, individual debug PNGs, per-fi
 
 ```text
 Proyecto-titan.v2/
-├── core/                          # Business-logic package (the de-facto "backend")
+├── core/                          # Business-logic package — 100% UI-AGNOSTIC (REST-ready "backend")
 │   ├── __init__.py                # empty
 │   ├── pdf_parser.py              # Session metadata + "Consolidated Results" via pdfplumber + regex
-│   ├── telemetry_extractor.py     # VISUAL telemetry extraction (pypdfium2 + OpenCV + Tesseract OCR)
+│   ├── telemetry_extractor.py     # VISUAL telemetry extraction (pypdfium2 + OpenCV + Tesseract OCR); debug I/O gated
 │   ├── telemetry_parser.py        # ALT config-driven extraction (pdfplumber + OpenCV, hardcoded pages)
-│   ├── graph_mapper.py            # Maps graph keys -> canonical signal names using mapeo.json
+│   ├── graph_mapper.py            # Maps/normalizes graph keys -> canonical signal names using mapeo.json
 │   ├── db_manager.py              # SQLite access: connection ctx-manager + insert/query helpers
-│   ├── behavior_analyzer.py       # Rule-based profile enum + per-signal telemetry metrics
+│   ├── pipeline.py                # Unified headless ETL orchestration (process_simulator_pdf) used by both frontends
+│   ├── behavior_analyzer.py       # Rule-based profile enum + per-signal telemetry metrics (LIVE, in use)
+│   ├── evaluador_diagnostico.py   # Diagnostic evaluation engine (dictamen, delta comparison, LLM payload)
 │   ├── analizador_eventos.py      # Raw "Student Console Events" extraction + feedback text
-│   ├── training_manager.py        # BehaviorAnalyzer + TrainingPath orchestrator  ⚠ ORPHANED/BROKEN
-│   ├── training_path.py           # Learning-path catalog per profile             ⚠ UNUSED by frontends
+│   ├── ai_advisor.py              # LLM-ready pedagogical feedback (mock/offline provider by default)
 │   ├── reporter.py                # Text report generation (individual + evolution)
-│   ├── report_generator.py        # PDF report generation (fpdf2 subclass)
-│   └── plotter.py                 # Matplotlib chart embedded in CustomTkinter    ⚠ GUI-coupled "core"
+│   └── report_generator.py        # PDF report generation (fpdf2 subclass)
+│
+├── ui/                            # GUI adapter layer — owns ALL CustomTkinter/TkAgg coupling
+│   ├── __init__.py                # package marker
+│   └── plotter.py                 # v3.0 — Matplotlib chart embedded in CustomTkinter (migrated from core/plotter.py)
 │
 ├── database/
 │   ├── schema.sql                 # DDL v4.0 — DROP TABLE IF EXISTS + CREATE
-│   └── titan.db                   # Live SQLite DB (7 sessions at time of analysis)
+│   └── titan.db                   # Live SQLite DB (11 sessions at time of this revision)
 │
 ├── data/
 │   ├── reports/                   # INPUT: source simulator PDF reports
@@ -112,34 +122,34 @@ Proyecto-titan.v2/
 ├── models/
 │   └── modelo_clasificador.joblib # Trained RandomForest classifier artifact
 │
-├── tests/
-│   └── test_manifest.py           # Ad-hoc validation script (print-based, NO assertions/pytest)
+├── tests/                         # Formal pytest suite (fixtures + assertions)
+│   ├── conftest.py                # Shared fixtures (seeded temp DB with known-score sessions)
+│   ├── test_arquitectura.py       # AST guard: core/ imports no UI toolkit; no stale duplication
+│   ├── test_pipeline_smoke.py     # Relocated ETL smoke test (temp DB, non-mutation asserts, idempotency)
+│   ├── test_evaluador_diagnostico.py
+│   ├── test_ai_advisor.py
+│   ├── test_report_generator.py
+│   └── test_manifest.py
 │
-├── debug_outputs/                 # ⚠ CV debug images (overlays/masks/crops) written on EVERY extraction
+├── debug_outputs/                 # CV debug images — written only when DEBUG_EXPORT_IMAGES=True (git-ignored)
 ├── .qoder/repowiki/               # Auto-generated repo wiki/knowledge (tooling, not app code)
 │
 ├── main.py                        # ENTRY: batch ETL driven by manifest.csv (NO telemetry extraction)
-├── app.py                         # ENTRY: CustomTkinter desktop app (590-line monolith)
-├── streamlit_app.py               # ENTRY: Streamlit web dashboard
-├── entrenador_ia.py               # ENTRY: ML training script (RandomForest -> joblib)
-├── analisis_mvp.py                # ENTRY: comparative per-profile analysis report
+├── app.py                         # ENTRY: CustomTkinter desktop app; imports ui.plotter (GUI preserved standalone)
+├── streamlit_app.py               # ENTRY: Streamlit web dashboard (active test bench)
+├── entrenador_ia.py               # ENTRY: "Fase 5" ML trainer (RandomForest -> models/modelo_clasificador.joblib)
 ├── setup_database.py              # ENTRY: (re)creates DB from schema.sql (DELETES existing file)
-│
-├── color_picker.py                # Utility: interactive image color/region picker
-├── coordinate_finder.py           # Utility: interactive coordinate finder
-├── debug_text_events.py           # Debug: PyMuPDF text extraction
-├── debug_text_events_plumber.py   # Debug: pdfplumber text extraction
-├── test_debug.py, test_debug2.py, test_extractor.py, test_fallback.py,
-├── test_final.py, test_grafico.py, test_mapper.py, test_plot_unknowns.py   # ⚠ Ad-hoc scripts at root
 │
 ├── manifest.csv                   # CONFIG: PDF filename -> labeled profile / operator / exercise
 ├── mapeo.json                     # CONFIG: "Graph_X_Y" key -> canonical signal name
-├── requirements.txt               # Flat pinned deps (pip-freeze style)
+├── requirements.txt               # Flat pinned deps (pip-freeze style; PyMuPDF removed)
 ├── README.md                      # EMPTY
-└── .gitignore                     # Minimal
+└── .gitignore                     # Excludes generated artifacts, DB, .qoder/, .venv
 ```
 
-**Modularity assessment:** The `core/` package is a reasonable domain layer, but the repository root is polluted with **6 entry scripts + ~12 ad-hoc `test_*`/`debug_*` scripts** that have no package boundary, no CLI framework, and overlapping responsibilities. There is no `src/` layout, no `api/`, no `services/`, and no clear separation between "application" and "experiment" code.
+**Modularity assessment:** After the cleanup refactor the repository root is lean: **5 entry scripts** (`main.py`, `app.py`, `streamlit_app.py`, `entrenador_ia.py`, `setup_database.py`) plus config/docs. All former ad-hoc `test_*`/`debug_*` root scripts and the legacy `analisis_mvp.py` ("Fase 3" profiles script) were **deleted**; the ETL smoke test was **relocated** into `tests/test_pipeline_smoke.py` as a formal pytest. The GUI coupling was **moved out of `core/`** into a dedicated `ui/` package, so `core/` is now a clean, headless domain layer with a single orchestration entry point (`core/pipeline.py`). There is still no `src/` layout and no `api/`/`services/` package, but the domain/service boundary is now clear enough to wrap with an HTTP layer.
+
+> **Do not conflate:** `entrenador_ia.py` ("Fase 5", the model trainer that regenerates `models/modelo_clasificador.joblib`) is **preserved** and is *not* the deleted "Fase 3" `analisis_mvp.py` profiles script.
 
 ---
 
@@ -214,23 +224,22 @@ manifest.csv ──► for each row:
 - The operator profile comes from the **human-labeled `manifest.csv`** (`perfil_etiquetado` column) — this is the *ground-truth/training* path.
 - **This pipeline does NOT extract or store telemetry at all.** `Telemetria` is never populated by `main.py`.
 
-### 4.2 Pipeline B — Interactive (`app.py` & `streamlit_app.py`, function `_procesar_y_obtener_id`)
+### 4.2 Pipeline B — Interactive (`app.py` & `streamlit_app.py`)
 ```
 uploaded/selected PDF
-  ├─ get_session_id_by_filename()   # if present → return cached id (idempotent)
-  ├─ parse_pdf_report()             # pdfplumber + regex
-  ├─ joblib.load(modelo_clasificador.joblib)
-  ├─ _preparar_datos_para_prediccion()  # pivot events → wide feature DataFrame
-  ├─ perfil = modelo.predict(df)[0]     # ⚠ profile comes from the ML MODEL here
-  ├─ conn.execute("BEGIN")
-  ├─ insert_session(perfil = ML prediction)
-  ├─ insert_summary_events()
-  ├─ TELEMETRY EXTRACTION  ← the two frontends DIVERGE here (see 4.4)
-  ├─ insert_telemetry_data() per signal
-  ├─ conn.commit()
-  └─ shutil.copy2(pdf → data/exports/)
+  └─ _procesar_y_obtener_id()  # thin UI adapter — delegates 100% to core.pipeline.process_simulator_pdf()
+        core.pipeline.process_simulator_pdf(pdf_path, profile_source, engine=...):
+          ├─ get_session_id_by_filename()   # if present → return cached id (idempotent)
+          ├─ parse_pdf_report()             # pdfplumber + regex
+          ├─ _resolve_profile()             # joblib model prediction (or None / manifest override)
+          ├─ _preparar_datos_para_prediccion()  # unified pivot events → wide feature DataFrame
+          ├─ transacted DB write (BEGIN … commit)
+          ├─ insert_session() / insert_summary_events()
+          ├─ _extract_telemetry()           # engine = "visual" (extractor) or "parser"; then map_graphs()
+          ├─ insert_telemetry_data() per signal
+          └─ _safe_copy_to_exports(pdf → data/exports/)
 ```
-- `_procesar_y_obtener_id` is **reimplemented separately** in `app.py` (lines ~514-547) and `streamlit_app.py` (lines ~69-110), with slightly different bodies. It is *not* in `core/`.
+- The ETL orchestration is **no longer duplicated**: both frontends now call the single headless service function `core/pipeline.py::process_simulator_pdf`, and `_procesar_y_obtener_id` in `app.py` / `streamlit_app.py` is just a thin adapter around it. Feature-vector construction (`_preparar_datos_para_prediccion`) is likewise centralized in `core/pipeline.py`.
 
 ### 4.3 PDF Text Parsing (`core/pdf_parser.py`)
 1. Force locale `en_US.UTF-8` for date parsing (silently ignored if unavailable).
@@ -255,46 +264,48 @@ uploaded/selected PDF
 - OCRs a strip **above** each box with `pytesseract` to read the chart title → `_guess_name_from_title()` keyword match.
 - If OCR fails → `_fallback_assign()` heuristic (guesses the signal from value range/span).
 - Extracts the curve (topmost purple pixel per column) and calibrates with `Y_RANGES`.
-- Writes many debug PNGs to `debug_outputs/` and prints per-candidate logs.
+- Debug PNG output to `debug_outputs/` is now **gated behind `DEBUG_EXPORT_IMAGES` (default `False`)** and logs via `logging` — it no longer writes images on every run.
 - **Returns keys that are canonical names OR `"Unknown_<page>_<cand>"`** — **never** `"Graph_X_Y"`.
 
-**Then `core/graph_mapper.py` (`map_graphs`)** is applied **only in the Streamlit path**: it iterates `mapeo.json` (whose keys are `"Graph_5_1"`, `"Graph_5_2"`, …) and keeps a signal only if `mapeo.json`'s `graph` key exists in the extractor output.
+**Then `core/graph_mapper.py` (`map_graphs`)** normalizes the extractor output to the six canonical signals. It now accepts **both** canonical keys (`"Steering"`, …) and legacy `"Graph_X_Y"` keys (mapped via `mapeo.json`), and discards unidentified `"Unknown_<page>_<cand>"` keys.
 
-> **⚠ Contract break (see §6-A):** Engine 2 emits `"Steering"`/`"Unknown_5_1"` keys, but `map_graphs` searches for `"Graph_5_1"` keys. The intersection is empty → `map_graphs` returns `{}` → **the Streamlit app persists no telemetry**.
+> **✅ Contract fixed (former §6-A):** `map_graphs` previously searched *only* for `"Graph_X_Y"` keys while Engine 2 emitted canonical/`"Unknown_X_Y"` keys, so the intersection was empty and **no telemetry was persisted**. `map_graphs` is now a safe normalizer that recognizes canonical keys directly (and legacy keys via `mapeo.json`), so the visual engine's telemetry is persisted correctly. Both engines are now selected through the single `core/pipeline.py` `engine=` parameter (`"visual"` or `"parser"`).
 
-### 4.5 Profile Assignment — **three sources of truth**
+### 4.5 Profile Assignment — **two sources of truth**
 The value written to `Sesiones.perfil_operador` depends on which path ran:
-1. **`main.py`** → the human **label** from `manifest.csv`.
-2. **`app.py` / `streamlit_app.py`** → the **ML model** prediction (`RandomForestClassifier`).
-3. **`core/training_manager.py`** → the **rule-based** `BehaviorAnalyzer` (thresholds on score/duration/penalties) — but this module is orphaned/broken (§6-C).
+1. **`main.py`** → the human **label** from `manifest.csv` (batch/training path).
+2. **`app.py` / `streamlit_app.py`** (via `core/pipeline.py::process_simulator_pdf`) → the **ML model** prediction (`RandomForestClassifier`), or `None` if the model is missing/fails. `core/pipeline.py` also accepts a `perfil_override` for manual/manifest labeling.
+
+> The former third source — the rule-based `BehaviorAnalyzer` invoked through `core/training_manager.py` — is **gone**: `training_manager.py`/`training_path.py` were deleted as orphaned/broken dead code (§6-C). The rule-based engine `core/behavior_analyzer.py` itself is **still present and in use** for per-signal telemetry metrics; it just no longer feeds a separate profile-assignment path. Diagnostic rule logic now lives in `core/evaluador_diagnostico.py`.
 
 ### 4.6 Analysis & Presentation (read path)
 - `core/behavior_analyzer.analizar_comportamiento_completo(session_id)` re-reads `Telemetria` from SQLite and computes per-signal metrics (hard-braking count, steering jerks, acceleration spikes, fork/tilt micro-adjustments, speed stats) using pandas `.diff()`.
 - `core/reporter.generar_texto_reporte_individual(...)` renders a formatted text block + rule-based narrative feedback.
-- Streamlit renders one Matplotlib chart per signal (`get_telemetry_for_graph`) and a "smart feedback" section from `analizador_eventos`. Desktop renders charts via `core/plotter` and can export PDFs via `core/report_generator` (fpdf2).
+- Streamlit renders one Matplotlib chart per signal (`get_telemetry_for_graph`) and a "smart feedback" section from `analizador_eventos`. Desktop renders charts via `ui/plotter` (the migrated, GUI-coupled layer) and can export PDFs via `core/report_generator` (fpdf2).
 
 ---
 
 ## 5. Frontend/Backend Coupling
 
-**Verdict: Partially separated — domain logic lives in `core/`, but the *application/orchestration* layer is duplicated inside each frontend, and one `core/` module is GUI-bound.**
+**Verdict: Now cleanly separated — domain logic lives in a UI-agnostic `core/`, the shared ETL orchestration is centralized in `core/pipeline.py`, and all GUI coupling is isolated in the `ui/` package. The remaining hotspots are configuration duplication and the desktop monolith's size.**
 
 ### 5.1 What is properly decoupled ✅
-- Parsing, extraction, DB access, behavior analysis, and report generation are all in `core/` and are importable without a UI.
-- Both frontends import from `core.*` and never the reverse (dependency direction is outward).
+- Parsing, extraction, DB access, behavior analysis, diagnostic evaluation, and report generation are all in `core/` and are importable without a UI.
+- The reusable "process a report" pipeline now exists **once**, in `core/pipeline.py::process_simulator_pdf`, consumed by both frontends through thin adapters.
+- Both frontends import from `core.*` (and `app.py` imports `ui.plotter`); `core/` never imports `ui/` or any GUI toolkit — enforced by the AST guard in `tests/test_arquitectura.py` (dependency direction is strictly outward).
 
-### 5.2 Coupling hotspots ⚠
-| # | Issue | Evidence | Impact |
+### 5.2 Coupling hotspots
+| # | Issue | Evidence | Impact / Status |
 |---|---|---|---|
-| C-1 | **Orchestration duplicated in frontends** | `_procesar_y_obtener_id` and `_preparar_datos_para_prediccion` exist in **both** `app.py` and `streamlit_app.py` with divergent bodies | No single reusable "process a report" service; bug fixes must be applied twice |
-| C-2 | **UI calls embedded in processing logic** | `streamlit_app._procesar_y_obtener_id` calls `st.error(...)` mid-ETL | The processing function cannot run headless (e.g., in a worker/API) without Streamlit |
-| C-3 | **A `core/` module depends on the GUI toolkit** | `core/plotter.py` imports `customtkinter` and `matplotlib...backend_tkagg` | "Backend" package is not UI-agnostic; cannot be lifted into a headless service as-is |
-| C-4 | **Config constants duplicated per frontend** | `GRAFICOS_DISPONIBLES`, `RUTAS_DE_APRENDIZAJE`, `DB_PATH`, `MODELS_PATH`, `EXPORTS_DIR` redefined in `app.py` and `streamlit_app.py` | Divergence risk; no central settings |
-| C-5 | **Frontends choose different extraction engines** | `app.py` → `telemetry_parser`; `streamlit_app.py` → `telemetry_extractor` + `graph_mapper` | Two behaviors for the same feature; only one currently works |
-| C-6 | **`core/` opens its own DB connections** | `behavior_analyzer.py` and `reporter.py` build `DB_PATH` and connect directly instead of receiving a connection | Hidden I/O inside "pure" logic; hard to inject a test/remote DB |
-| C-7 | **Desktop monolith** | `app.py` = 590 lines mixing theme, widgets, tooltips, ML predict, DB, file copy | High change cost; UI and logic not separable without refactor |
+| C-1 | ~~Orchestration duplicated in frontends~~ | **✅ RESOLVED** — `_procesar_y_obtener_id` in both frontends is now a thin adapter delegating to `core/pipeline.py::process_simulator_pdf`; `_preparar_datos_para_prediccion` centralized in `core/pipeline.py` | Single reusable headless service function; fixes apply once |
+| C-2 | UI calls embedded in processing logic | The processing logic now lives in `core/pipeline.py`, which returns an `errors` list instead of calling UI APIs; frontends surface those errors | Headless-safe; UI feedback is presentation-only |
+| C-3 | ~~A `core/` module depends on the GUI toolkit~~ | **✅ RESOLVED** — `core/plotter.py` was migrated to `ui/plotter.py`; `core/` now has zero customtkinter/TkAgg/tkinter/matplotlib/streamlit/plotly/altair/PyQt/PySide/kivy imports | `core/` is UI-agnostic and can be lifted into a headless service as-is |
+| C-4 | **Config constants duplicated per frontend** | `GRAFICOS_DISPONIBLES`, `RUTAS_DE_APRENDIZAJE`, `DB_PATH`, `MODELS_PATH`, `EXPORTS_DIR` redefined in `app.py` and `streamlit_app.py` | Divergence risk; no central settings (still open) |
+| C-5 | ~~Frontends choose different extraction engines~~ | **✅ Addressed** — engine selection is now a single `engine=` parameter (`"visual"`/`"parser"`) on `core/pipeline.py`; both go through the same `map_graphs` normalizer | One code path, selectable engine |
+| C-6 | **`core/` opens its own DB connections** | `behavior_analyzer.py` builds `DB_PATH` and connects directly (`reporter.py` now uses `db_manager.get_db_connection`) | Hidden I/O inside "pure" logic; hard to inject a test/remote DB (partially open) |
+| C-7 | **Desktop monolith** | `app.py` remains a large CustomTkinter module mixing theme, widgets, tooltips, and orchestration calls | High change cost; preserved intentionally as a standalone tool |
 
-**Bottom line for SimuTwin:** A clean service cannot be carved out by simply "calling `core/`". The reusable pipeline (`process PDF → profile + telemetry → persist`) currently exists **only inside the frontends** and must first be extracted into a headless `core/` service function.
+**Bottom line for SimuTwin:** A clean service **can** now be carved out by wrapping `core/` — the reusable pipeline (`process PDF → profile + telemetry → persist`) exists as a single headless function (`core/pipeline.py::process_simulator_pdf`) with injectable `db_path`/`models_path`/`exports_dir`/`engine` parameters. Remaining work is configuration management, persistence redesign, and the HTTP/deploy layer.
 
 ---
 
@@ -302,27 +313,25 @@ The value written to `Sesiones.perfil_operador` depends on which path ran:
 
 Prioritized. Severity: 🔴 Critical (blocks integration) · 🟠 High · 🟡 Medium.
 
-### 🔴 A — Broken extractor→mapper contract (silent data loss)
-- **Where:** `core/graph_mapper.py` + `mapeo.json` vs `core/telemetry_extractor.py`; consumed in `streamlit_app.py:102-106`.
-- **What:** `map_graphs` looks up `"Graph_X_Y"` keys, but the visual extractor emits canonical/`"Unknown_X_Y"` keys. Intersection is empty → returns `{}`.
-- **Impact:** The Streamlit web app persists **no telemetry**, so all charts/metrics are empty there. Fails silently (only verbose `print` debug).
-- **Fix:** Unify the naming contract — either have the extractor emit `Graph_X_Y` keys, or drop `graph_mapper` and insert extractor output directly (as the desktop path does). Then reconcile `mapeo.json`.
+### ✅ A — Broken extractor→mapper contract (RESOLVED)
+- **Where:** `core/graph_mapper.py` (`map_graphs`) + `mapeo.json` vs `core/telemetry_extractor.py`; consumed via `core/pipeline.py::_extract_telemetry`.
+- **Was:** `map_graphs` looked up only `"Graph_X_Y"` keys while the visual extractor emitted canonical/`"Unknown_X_Y"` keys → empty intersection → `{}` → no telemetry persisted (silent data loss).
+- **Fix applied:** `map_graphs` is now a safe normalizer that recognizes canonical keys directly and legacy `"Graph_X_Y"` keys via `mapeo.json`, discarding unidentified keys. Telemetry from the visual engine is now persisted correctly.
 
-### 🔴 B — Duplicated & divergent ETL orchestration
-- **Where:** `app.py` vs `streamlit_app.py` (`_procesar_y_obtener_id`, `_preparar_datos_para_prediccion`, config dicts); two telemetry engines.
-- **Impact:** No single source of truth; the two UIs behave differently; any microservice must first consolidate this into one headless `core` service entry point.
-- **Fix:** Extract a `core/pipeline.py::process_report(pdf, conn, profile_source)` used by all callers; delete per-frontend copies.
+### ✅ B — Duplicated & divergent ETL orchestration (RESOLVED)
+- **Where:** formerly `app.py` vs `streamlit_app.py`; now consolidated in `core/pipeline.py::process_simulator_pdf`.
+- **Fix applied:** A single headless orchestration function (`process_report`-style: `process_simulator_pdf`) is used by all callers; the per-frontend copies were reduced to thin adapters, and the two telemetry engines are selected through one `engine=` parameter.
 
-### 🟠 C — Orphaned / broken training subsystem (dead code + runtime ImportError)
-- **Where:** `core/training_manager.py` imports `get_sessions_by_operator` and `get_summary_events_by_session` from `core.db_manager` — **these functions do not exist** (grep-confirmed). `core/training_path.py` and the rule-based `BehaviorAnalyzer` are not used by either frontend (they use a hardcoded `RUTAS_DE_APRENDIZAJE` dict instead).
-- **Impact:** Calling `TrainingManager.evaluate_operator(...)` raises `ImportError`. Confuses architects about which recommendation engine is authoritative.
-- **Fix:** Either implement the missing DB helpers and wire the module in, or delete `training_manager.py`/`training_path.py` and consolidate on one recommendation source.
+### ✅ C — Orphaned / broken training subsystem (REMOVED)
+- **Where:** `core/training_manager.py` and `core/training_path.py`.
+- **Was:** `training_manager.py` imported `get_sessions_by_operator` / `get_summary_events_by_session` from `core.db_manager` — functions that did not exist — so `TrainingManager.evaluate_operator(...)` raised `ImportError` at runtime; neither module was imported by any frontend.
+- **Action taken:** Both modules were **deleted** as orphaned/broken dead code. The live rule-based engine `core/behavior_analyzer.py` is **retained and still used**; rule-based diagnostic logic now resides in `core/evaluador_diagnostico.py`.
 
-### 🟠 D — `print()`-based error handling that swallows failures
-- **Where:** pervasive — `db_manager.py`, `pdf_parser.py`, `behavior_analyzer.py`, `telemetry_extractor.py`, `analisis_mvp.py`.
-- **Pattern:** broad `try/except Exception` → `print(...)` → return `None`/`{}`/`0`.
-- **Impact:** No structured logging, no error propagation, no way for a calling service to distinguish "no data" from "crashed". Unobservable in production.
-- **Fix:** Introduce `logging`, typed exceptions, and let errors bubble to a service boundary that returns proper HTTP statuses.
+### 🟠 D — Mixed `print()`/`logging` error handling
+- **Where:** `logging` was adopted in the newer/refactored `core/` modules (`pipeline.py`, `evaluador_diagnostico.py`, `graph_mapper.py`, `report_generator.py`, `telemetry_extractor.py`, `ai_advisor.py`), but `print()`-based handling still persists in some modules (`db_manager.py`, `pdf_parser.py`, `behavior_analyzer.py`). (The former `analisis_mvp.py` print-heavy script was deleted.)
+- **Pattern:** broad `try/except Exception` → `print(...)` / `logger.warning(...)` → return `None`/`{}`/`0`.
+- **Impact:** Inconsistent observability; some paths still swallow failures without structured logs.
+- **Fix:** Finish migrating the remaining modules to `logging`, use typed exceptions, and let errors bubble to a service boundary that returns proper HTTP statuses.
 
 ### 🔴 E — Hardcoded configuration & magic numbers (no env injection)
 - **Where:** everywhere. `DB_PATH`/`MODELS_PATH`/`EXPORTS_DIR` computed from `__file__`; `GRAPH_CONFIGS` page numbers and pixel-calibration coordinates; `Y_RANGES`; HSV color bounds; classification thresholds (`score>=85`, `penalties<=2`, `duration<180/>600`); learning-path catalogs; `manifest.csv` column names.
@@ -334,10 +343,10 @@ Prioritized. Severity: 🔴 Critical (blocks integration) · 🟠 High · 🟡 M
 - **Impact:** No SQL aggregation/indexing; heavy Python-side parsing; blocks migration to PostgreSQL/Supabase/time-series stores.
 - **Fix:** Model as a point table `(id, session_id, signal, t, value)` or a `JSONB`/array column in Postgres; add proper typing.
 
-### 🟠 G — Side-effecting extraction + committed debug artifacts
-- **Where:** `core/telemetry_extractor.py` writes dozens of PNGs into `debug_outputs/` and prints verbose logs **on every run**; `graph_mapper.py` prints debug traces. `debug_outputs/`, `database/titan.db`, `models/`, and `data/exports/` are **not git-ignored**.
-- **Impact:** A "stateless" service that writes to the local filesystem on each request; repo pollution; non-deterministic artifacts.
-- **Fix:** Gate debug output behind a flag/env var; write to a temp/volume dir; expand `.gitignore`.
+### 🟡 G — Side-effecting extraction + debug artifacts (mostly resolved)
+- **Where:** `core/telemetry_extractor.py` can write PNGs into `debug_outputs/`, but this is now **gated behind `DEBUG_EXPORT_IMAGES` (default `False`)** and logs via `logging` instead of printing on every run. `.gitignore` now excludes `debug_outputs/`, `data/exports/`, and `*.db`/`*.sqlite`.
+- **Impact:** Largely mitigated — a normal run is side-effect-free w.r.t. debug images, and generated artifacts/DB are no longer version-controlled. Residual: `models/` is still committed and the debug flag is a module constant, not an env var.
+- **Fix:** Drive the debug flag from configuration/env; keep artifacts out of the image; write debug output to a temp/volume dir when enabled.
 
 ### 🔴 H — No service, packaging, or deployment layer
 - **Where:** repo-wide. No API framework, no `Dockerfile`, no CI, no `pyproject.toml`, no dependency grouping, undocumented **Tesseract** OS dependency, no `python_requires`.
@@ -345,42 +354,42 @@ Prioritized. Severity: 🔴 Critical (blocks integration) · 🟠 High · 🟡 M
 - **Fix:** Add FastAPI wrapper around the consolidated `core` pipeline; multi-stage Dockerfile with `tesseract-ocr` + `libgl` (OpenCV); split direct vs transitive deps; add CI.
 
 ### 🟠 I — Degenerate ML model / fragile feature contract
-- **Where:** `entrenador_ia.py` (training) + `_preparar_datos_para_prediccion` (two divergent copies). Live DB shows **all 7 sessions predicted `Ineficiente`**.
-- **Impact:** The classifier currently provides no discrimination (single-class collapse) — likely a tiny/imbalanced training set from `manifest.csv`. Feature alignment relies on manual DataFrame column juggling that differs between `app.py` and `streamlit_app.py`.
-- **Fix:** Grow/curate the labeled dataset, add class-balance/validation metrics and a model registry, and centralize feature-vector construction in `core`.
+- **Where:** `entrenador_ia.py` (training, "Fase 5") + `_preparar_datos_para_prediccion` (now a **single unified copy** in `core/pipeline.py`). The live DB previously showed all sessions predicted `Ineficiente`; the current snapshot (11 sessions) contains **both `Eficiente` and `Ineficiente`**, so the collapse is no longer total but the training set remains tiny/imbalanced.
+- **Impact:** The classifier still risks weak discrimination on a small `manifest.csv`-derived dataset. Feature-vector construction is now centralized (no longer divergent between frontends).
+- **Fix:** Grow/curate the labeled dataset, add class-balance/validation metrics and a model registry.
 
 ### 🟠 J — SQLite concurrency & manual transaction control
-- **Where:** `core/db_manager.get_db_connection` is a plain context manager that **does not commit/rollback**; callers manage transactions (`streamlit_app` issues `conn.execute("BEGIN")` manually). Multiple modules open independent connections.
+- **Where:** `core/db_manager.get_db_connection` is a plain context manager that **does not commit/rollback**; transaction boundaries are managed by the caller — now centralized in `core/pipeline.py` (explicit `BEGIN` … `commit`). `behavior_analyzer.py` still opens its own independent connection.
 - **Impact:** Under Streamlit's multi-user runtime (or any concurrent service), SQLite file locking will cause `database is locked` errors and inconsistent commits.
-- **Fix:** Move to a server DB (PostgreSQL) for SimuTwin, use a pooled connection/ORM, and centralize transaction boundaries.
+- **Fix:** Move to a server DB (PostgreSQL) for SimuTwin, use a pooled connection/ORM, and keep transaction boundaries centralized.
 
-### 🟡 K — No real test suite & brittle PDF parser
-- **Where:** root `test_*.py` and `tests/test_manifest.py` are **print-based scripts** with no assertions and no pytest. `core/pdf_parser.py` depends on exact English labels, page-1 layout, and a fixed table format.
-- **Impact:** No regression safety net; silent breakage when the simulator's PDF template changes.
-- **Fix:** Add pytest with golden-file fixtures (sample PDFs → expected parse output); validate extraction against a known corpus.
+### 🟡 K — Brittle PDF parser (test suite now present)
+- **Where:** the former ad-hoc root `test_*.py` print scripts were **deleted**; `tests/` is now a **formal pytest suite** (`conftest.py` fixtures with assertions, incl. `test_manifest.py`, `test_evaluador_diagnostico.py`, `test_ai_advisor.py`, `test_report_generator.py`, `test_pipeline_smoke.py`, and the AST `test_arquitectura.py`). The remaining risk is that `core/pdf_parser.py` still depends on exact English labels, page-1 layout, and a fixed table format.
+- **Impact:** Regression safety net now exists; silent breakage is still possible when the simulator's PDF template changes.
+- **Fix:** Add golden-file fixtures (sample PDFs → expected parse output) and validate extraction against a known corpus.
 
 ### 🟡 L — Version-number drift & empty docs
-- **Where:** Per-file version comments disagree (`db_manager` "v5.0", `pdf_parser` "v23.0", `app.py` "v8.2", `telemetry_parser` "v8.0", schema "v4.0", Streamlit title "v2.0"); `README.md` is empty; `.gitignore` has a stray first line ("Fragmento de código").
+- **Where:** Per-file version comments disagree (`db_manager` "v5.0", `pdf_parser` "v23.0", `app.py` "v8.2", `telemetry_parser` "v8.0", `ui/plotter` "v3.0", schema "v4.0", Streamlit title "v2.0"); `README.md` is still empty. (The former stray `.gitignore` first line has been cleaned; `.gitignore` is now comprehensive.)
 - **Impact:** No reliable notion of "what version is deployed"; onboarding friction.
-- **Fix:** Single source of version truth (package metadata), a real README, and cleaned `.gitignore`.
+- **Fix:** Single source of version truth (package metadata) and a real README.
 
 ---
 
 ## 7. Microservice Readiness Notes for SimuTwin
 
-**Suggested extraction boundary (target):** a headless `core` service exposing roughly:
+**Suggested extraction boundary (target):** a headless `core` service. The primary entry point **already exists** as `core/pipeline.py::process_simulator_pdf(pdf_path, profile_source, *, db_path, models_path, exports_dir, engine, perfil_override) -> {session_id, metadata, telemetry_loaded, profile, errors, cached}`, with injectable paths/engine — it just needs an HTTP wrapper. Alongside it:
 ```
-process_report(pdf_bytes, profile_source="model"|"label") -> {session, summary_events, telemetry[], profile}
-analyze_session(session_id) -> behavior metrics
-recommend_training(profile) -> learning path
+process_simulator_pdf(pdf_path, profile_source="model"|"none", engine="visual"|"parser") -> {session_id, metadata, telemetry, profile}   # EXISTS in core/pipeline.py
+analyze_session(session_id) -> behavior metrics                 # core/behavior_analyzer.analizar_comportamiento_completo
+evaluate_diagnostic(session_id[, post]) -> dictamen / delta      # core/evaluador_diagnostico
 ```
 wrapped by a FastAPI app, backed by PostgreSQL (redesigned telemetry table), configured via env vars, containerized with Tesseract + OpenCV system libs.
 
-**What can be reused largely as-is:** `pdf_parser`, `telemetry_extractor` (after fixing the mapper contract and gating debug I/O), `behavior_analyzer` metric functions, `reporter`/`report_generator`, the trained-model loading pattern.
+**What can be reused largely as-is:** `core/pipeline.py` (the consolidated orchestration), `pdf_parser`, `telemetry_extractor` (mapper contract fixed, debug I/O now gated), `behavior_analyzer` metric functions, `evaluador_diagnostico`, `ai_advisor` (LLM-ready), `reporter`/`report_generator`, and the trained-model loading pattern. `core/` is already UI-agnostic and REST-ready.
 
-**What must be rebuilt before integration:** the orchestration layer (currently duplicated in frontends), configuration management, persistence model & concurrency, error handling/observability, packaging/deployment, and the ML training/validation pipeline.
+**What must still be built before integration:** the HTTP/service layer, configuration management (env injection), persistence model & concurrency (PostgreSQL), full observability, packaging/deployment (Docker incl. Tesseract + OpenCV), and ML dataset curation/validation.
 
-**What should be deleted or quarantined:** `core/training_manager.py` + `core/training_path.py` (orphaned/broken), the duplicate `telemetry_parser.py` engine (pick one), root-level `test_*`/`debug_*` scripts, and committed `debug_outputs/`.
+**Already deleted / resolved in this refactor:** `core/training_manager.py` + `core/training_path.py` (removed as orphaned/broken), the duplicated frontend orchestration (consolidated into `core/pipeline.py`), `core/plotter.py`'s GUI coupling (migrated to `ui/plotter.py`), the root-level `test_*`/`debug_*`/`analisis_mvp.py` scripts (deleted), the `PyMuPDF` dependency (dropped), and committed `debug_outputs/` (now git-ignored). The duplicate `telemetry_parser.py` engine is **retained** but is now selectable via one `engine=` parameter rather than diverging per frontend.
 
 ---
 

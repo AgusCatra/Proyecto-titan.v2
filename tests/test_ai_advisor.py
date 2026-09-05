@@ -73,7 +73,7 @@ def test_mock_interpreta_volantazos_frenadas_colisiones_y_horquilla_alta(conn_se
     assert "6" in narracion                    # frenadas bruscas
 
     vicios = " ".join(resultado["vicios_operativos"]).lower()
-    assert "anticipaci" in vicios              # frenada sin anticipación
+    assert "frenadas bruscas" in vicios        # vicio de frenadas (banda moderada)
     assert "volante" in vicios or "direcci" in vicios
     assert "horquilla" in vicios               # vicio normativo crítico
 
