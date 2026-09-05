@@ -1,9 +1,14 @@
 # core/db_manager.py
-# Versión: 5.0 - Corregida la función para obtener telemetría para gráficos.
+# Proyecto Titán — Capa de acceso a datos (SQLite).
+#
+# Única fuente de verdad de las consultas SQL del proyecto: ni los frontends ni
+# los generadores de documentos deben escribir SQL propio. Todas las funciones
+# reciben una conexión abierta (inyección de dependencias) para que el ciclo de
+# vida de la transacción lo decida el llamador.
 
 import sqlite3
 import os
-from typing import Optional, List, Tuple, Dict
+from typing import Any, Optional, List, Tuple, Dict
 from contextlib import contextmanager
 
 # Definir la ruta a la base de datos
@@ -32,7 +37,9 @@ def get_db_connection(db_path: str):
         if conn:
             conn.close()
 
-# --- FUNCIÓN CORREGIDA Y ACTUALIZADA ---
+# =============================================================================
+# LECTURA DE TELEMETRÍA
+# =============================================================================
 def get_telemetry_for_graph(
     id_sesion: int,
     graph_name: str,
@@ -89,7 +96,80 @@ def get_telemetry_for_graph(
         if close_conn and conn:
             conn.close()
 
-# (Aquí debe estar el resto del código de db_manager.py, como insert_session, etc.)
+# =============================================================================
+# LECTURA DE SESIONES Y EVENTOS
+# =============================================================================
+def _fila_a_dict(cursor: sqlite3.Cursor, row: Any) -> Dict[str, Any]:
+    """Convierte una fila a ``dict`` con y sin ``row_factory=sqlite3.Row``."""
+    if row is None:
+        return {}
+    try:
+        return dict(row)
+    except (TypeError, ValueError):
+        columnas = [d[0] for d in (cursor.description or [])]
+        return dict(zip(columnas, tuple(row)))
+
+
+def list_sessions(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """Lista todas las sesiones con los campos descriptivos usados por las UI.
+
+    Devuelve ``[]`` ante cualquier error de BD (lectura degradada, nunca lanza).
+    """
+    sql = (
+        "SELECT id_sesion, nombre_operador, nombre_clase, nombre_ejercicio, "
+        "fecha_hora_inicio, duracion_segundos, puntaje_final, perfil_operador "
+        "FROM Sesiones ORDER BY id_sesion"
+    )
+    try:
+        cursor = conn.execute(sql)
+        return [_fila_a_dict(cursor, row) for row in cursor.fetchall()]
+    except sqlite3.Error as e:
+        print(f"[list_sessions] Error DB: {e}")
+        return []
+
+
+def get_session_row(conn: sqlite3.Connection, session_id: int) -> Optional[Dict[str, Any]]:
+    """Devuelve la fila completa de ``Sesiones`` como ``dict``, o ``None``."""
+    sql = "SELECT * FROM Sesiones WHERE id_sesion = ?"
+    try:
+        cursor = conn.execute(sql, (session_id,))
+        row = cursor.fetchone()
+    except sqlite3.Error as e:
+        print(f"[get_session_row] Error DB: {e}")
+        return None
+    return _fila_a_dict(cursor, row) if row is not None else None
+
+
+def sumar_penalizaciones(conn: sqlite3.Connection, session_id: int) -> float:
+    """Suma de penalizaciones agregadas de la sesión (se almacenan en NEGATIVO)."""
+    sql = "SELECT COALESCE(SUM(penalizaciones), 0.0) FROM ResumenEventos WHERE id_sesion = ?"
+    try:
+        row = conn.execute(sql, (session_id,)).fetchone()
+    except sqlite3.Error as e:
+        print(f"[sumar_penalizaciones] Error DB: {e}")
+        return 0.0
+    valor = row[0] if row else None
+    return float(valor) if valor is not None else 0.0
+
+
+def sumar_eventos_por_tipo(conn: sqlite3.Connection, session_id: int, tipo_evento: str) -> int:
+    """Suma de ``conteo_eventos`` de un tipo de evento concreto (0 si no existe)."""
+    sql = (
+        "SELECT COALESCE(SUM(conteo_eventos), 0) FROM ResumenEventos "
+        "WHERE id_sesion = ? AND tipo_evento = ?"
+    )
+    try:
+        row = conn.execute(sql, (session_id, tipo_evento)).fetchone()
+    except sqlite3.Error as e:
+        print(f"[sumar_eventos_por_tipo] Error DB: {e}")
+        return 0
+    valor = row[0] if row else None
+    return int(valor) if valor is not None else 0
+
+
+# =============================================================================
+# ESCRITURA (INGESTA DEL PIPELINE)
+# =============================================================================
 def get_session_id_by_filename(connection: sqlite3.Connection, filename: str) -> Optional[int]:
     sql = "SELECT id_sesion FROM Sesiones WHERE nombre_archivo_origen = ?"
     cursor = connection.cursor()

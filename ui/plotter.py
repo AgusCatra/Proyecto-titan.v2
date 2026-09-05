@@ -1,7 +1,10 @@
-# core/plotter.py
-# Proyecto Titán - Módulo de Visualización de Telemetría
-# Versión: 2.0
+# ui/plotter.py
+# Proyecto Titán - Módulo de Visualización de Telemetría (CustomTkinter)
+# Versión: 3.0 — reubicado desde core/plotter.py (desacoplamiento de UI).
 # Objetivo: Integrar gráficos de Matplotlib en la interfaz de CustomTkinter.
+#
+# Este módulo pertenece a la capa ``ui`` porque depende de customtkinter y del
+# backend TkAgg de Matplotlib. ``core/`` no debe importar nada de aquí.
 
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg

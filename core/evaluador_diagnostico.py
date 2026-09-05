@@ -1,41 +1,46 @@
 # core/evaluador_diagnostico.py
-# Proyecto Titán — Motor de evaluación pedagógica (lógica pura, SIN Streamlit).
-# Versión: 2.0 (correcciones C1..C9, S1..S3, S7 de la revisión de código)
+# Proyecto Titán — Motor de evaluación pedagógica (lógica pura, SIN frontend).
 #
-# Este módulo concentra la lógica de negocio del diagnóstico de admisión y de la
-# comparativa de evolución (delta) entre dos sesiones de simulador. No depende de
-# ninguna librería de UI: solo de sqlite3, numpy y de los helpers ya existentes en
-# ``core.db_manager``.
+# Este módulo concentra TODAS las reglas de negocio pedagógicas del diagnóstico de
+# admisión y de la comparativa de evolución (delta) entre sesiones de simulador.
+# No depende de ninguna librería de UI: solo de sqlite3, numpy y de los helpers de
+# acceso a datos de ``core.db_manager``.
 #
 # Principios de diseño:
 #   * Tolerancia a datos incompletos: si una señal de telemetría no existe, si la
 #     sesión no está en la BD o si las series vienen vacías, NO se lanzan
 #     excepciones; se devuelven dicts coherentes con valores por defecto (0 / 0.0)
 #     y una justificación en texto.
-#   * Cobertura explícita [C1]: la AUSENCIA de telemetría NUNCA se confunde con
+#   * Cobertura explícita: la AUSENCIA de telemetría NUNCA se confunde con
 #     "conducción limpia". Si faltan señales críticas no se emite "Apto".
-#   * SQL siempre parametrizado (?), nunca interpolado con f-strings.
+#   * SQL centralizado en ``core.db_manager`` (siempre parametrizado).
 #   * Series SIEMPRE ordenadas por tiempo antes de calcular derivadas.
-#   * Integración temporal robusta a huecos de muestreo [C5]: los saltos mayores que
+#   * Integración temporal robusta a huecos de muestreo: los saltos mayores que
 #     ``DT_MAX`` NO suman tiempo ni se interpolan (no se inventa velocidad).
 #   * Detección de vicios por EVENTOS (rachas / inversiones), combinando tasa y
-#     amplitud [C4], alineada con la especificación pedagógica del usuario.
+#     amplitud, alineada con la especificación pedagógica.
 #   * Umbrales definidos como constantes de módulo, documentadas y ajustables.
+#   * Salidas 100 % nativas y JSON-serializables (dict / list / float / str): el
+#     mismo contrato sirve para Streamlit, para la app desktop y para una API REST.
 
 """Motor de evaluación pedagógica del Proyecto Titán.
 
-Expone tres capacidades principales:
+Expone cuatro capacidades principales:
 
 1. :func:`evaluar_diagnostico_inicial` — dictamen de admisión (Día 1) a partir de
    los vicios de manejo detectados en la telemetría y las colisiones registradas.
 2. :func:`comparar_sesiones_delta` — comparativa Pre/Post (Día Final) con deltas
-   absolutos y porcentuales, veredicto de evolución y resumen imprimible.
+   absolutos y porcentuales, veredicto de evolución y clasificación estructurada
+   de mejoras/retrocesos.
 3. Persistencia de la decisión del instructor sobre la tabla ``DecisionInstructor``
    (creada de forma segura con ``CREATE TABLE IF NOT EXISTS``).
+4. :func:`obtener_payload_para_llm` — payload plano y JSON-serializable con las
+   métricas físicas que consume :mod:`core.ai_advisor`.
 """
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -44,7 +49,15 @@ import numpy as np
 # --- Reutilización de helpers existentes ---
 # ``map_graphs`` normaliza ``nombre_grafico`` a las 6 señales canónicas (y resuelve
 # nombres legacy ``Graph_X_Y`` vía mapeo.json), igual que el pipeline de ingesta.
+from core.db_manager import (
+    get_session_row,
+    sumar_eventos_por_tipo,
+    sumar_penalizaciones,
+)
 from core.graph_mapper import map_graphs
+
+logger = logging.getLogger(__name__)
+
 
 # =============================================================================
 # CONSTANTES DE UMBRAL (ajustables en un único lugar)
@@ -66,19 +79,19 @@ SENALES_CANONICAS: List[str] = [
     SENAL_SPEED,
 ]
 
-# Señales imprescindibles para poder afirmar que NO hay vicios (C1). Si falta
+# Señales imprescindibles para poder afirmar que NO hay vicios. Si falta
 # alguna, la ausencia de detección se debe a falta de datos, no a buena conducción.
 SENALES_CRITICAS: List[str] = [SENAL_BRAKE, SENAL_STEERING, SENAL_FORK_HEIGHT]
-# Cobertura mínima (de 6 señales) exigida para poder emitir un "Apto" (C1).
+# Cobertura mínima (de 6 señales) exigida para poder emitir un "Apto".
 COBERTURA_MINIMA_SENALES: int = 4
 
-# --- Muestreo / integración temporal (C5) -----------------------------------
+# --- Muestreo / integración temporal -----------------------------------
 # Intervalo máximo (s) entre muestras que se considera un muestreo real continuo.
 # Por encima de este valor hay un HUECO (pérdida de extracción): ese tramo NO suma
 # tiempo ni se interpola, para no fabricar velocidad/duración sin evidencia.
 DT_MAX: float = 3.0
 
-# --- Frenadas bruscas (C4) --------------------------------------------------
+# --- Frenadas bruscas --------------------------------------------------
 # Tasa de subida del pedal de freno (unidades/s). Referencia de behavior_analyzer.
 FRENADO_TASA_UMBRAL: float = 5.0
 # Valor alto del pedal de freno (rango típico 0..10): "subida vertical hacia 10".
@@ -87,10 +100,10 @@ FRENADO_VALOR_ALTO: float = 8.0
 FRENADAS_EVENTOS_MODERADO: int = 4
 FRENADAS_EVENTOS_ALTO: int = 10
 # Muestras con el pedal en rango alto (frenado sostenido/dureza) que aportan
-# severidad al dictamen (antes se calculaba y se descartaba — C4).
+# severidad al dictamen (antes se calculaba y se descartaba).
 PICOS_FRENO_ALTO_UMBRAL: int = 20
 
-# --- Volantazos (C4) --------------------------------------------------------
+# --- Volantazos --------------------------------------------------------
 # Tasa de cambio absoluta de la dirección (unidades/s). Referencia behavior_analyzer.
 DIRECCION_TASA_UMBRAL: float = 15.0
 # Amplitud mínima (unidades de dirección, rango -14..+14) para que una inversión de
@@ -102,7 +115,7 @@ DIRECCION_VARIANZA_ALTA: float = 25.0
 VOLANTAZOS_EVENTOS_MODERADO: int = 4
 VOLANTAZOS_EVENTOS_ALTO: int = 10
 
-# --- Inseguridad en torre (S1) ----------------------------------------------
+# --- Inseguridad en torre ----------------------------------------------
 # Amplitud mínima de un movimiento de horquilla (m) / inclinación (deg) para
 # considerarlo un microajuste real y no ruido de calibración.
 MICROAJUSTE_AMPLITUD_MIN: float = 0.02
@@ -111,7 +124,7 @@ MICROAJUSTE_INVERSIONES_ALTO: int = 40
 # Segundos acumulados en régimen de microajuste que aportan severidad.
 MICROAJUSTE_SEGUNDOS_ALTO: float = 30.0
 
-# --- Traslado con horquilla alta (C5) ---------------------------------------
+# --- Traslado con horquilla alta ---------------------------------------
 # Altura de horquilla (m) por encima de la cual NO es seguro trasladarse.
 FORK_SAFE_THRESHOLD_MTRS: float = 0.30
 # Velocidad mínima (Km/h) para considerar que la máquina se está trasladando.
@@ -122,6 +135,52 @@ TRASLADO_ALTO_SEGUNDOS_ALTO: float = 15.0
 # --- Colisiones -------------------------------------------------------------
 COLISIONES_CRITICO: int = 3
 COLISIONES_OBSERVADO: int = 1
+# ``tipo_evento`` tal como lo registra el simulador en ``ResumenEventos``.
+TIPO_EVENTO_COLISION: str = "Collision"
+
+# --- Veredicto de evolución (delta de puntaje depurado) ----------------------
+# Única definición de la regla: la consume tanto el motor de diagnóstico como el
+# generador de documentos (``core.report_generator``).
+UMBRAL_MEJORA_SIGNIFICATIVA: float = 15.0
+UMBRAL_MEJORA_MODERADA: float = 1.0
+UMBRAL_REGRESION: float = -1.0
+
+VEREDICTO_MEJORA_SIGNIFICATIVA: str = "MEJORA SIGNIFICATIVA"
+VEREDICTO_MEJORA_MODERADA: str = "MEJORA MODERADA"
+VEREDICTO_REGRESION: str = "REGRESIÓN DETECTADA"
+VEREDICTO_ESTANCADO: str = "RENDIMIENTO ESTANCADO"
+VEREDICTO_SIN_DATOS: str = "SIN DATOS"
+
+# --- Sentido de mejora de cada métrica comparada -----------------------------
+MAYOR_ES_MEJOR: str = "mayor_es_mejor"
+MENOR_ES_MEJOR: str = "menor_es_mejor"
+
+# --- Dictámenes de admisión y nivel de riesgo --------------------------------
+DICTAMEN_APTO: str = "Apto"
+DICTAMEN_OBSERVADO: str = "Observado"
+DICTAMEN_NO_APTO_CRITICO: str = "No Apto Crítico"
+
+RIESGO_BAJO: str = "bajo"
+RIESGO_MEDIO: str = "medio"
+RIESGO_ALTO: str = "alto"
+
+# Severidad acumulada que dispara cada dictamen.
+SEVERIDAD_OBSERVADO: int = 2
+SEVERIDAD_NO_APTO: int = 5
+
+# --- Códigos estables de hallazgos (contrato con UI / documentos / LLM) -------
+HALLAZGO_COBERTURA_INSUFICIENTE: str = "cobertura_insuficiente"
+HALLAZGO_SESION_INEXISTENTE: str = "sesion_inexistente"
+HALLAZGO_COLISIONES_CRITICAS: str = "colisiones_criticas"
+HALLAZGO_COLISIONES: str = "colisiones"
+HALLAZGO_FRENADAS_ALTO: str = "frenadas_bruscas_alto"
+HALLAZGO_FRENADAS_MODERADO: str = "frenadas_bruscas_moderado"
+HALLAZGO_FRENO_SOSTENIDO: str = "freno_sostenido"
+HALLAZGO_VOLANTAZOS_ALTO: str = "volantazos_alto"
+HALLAZGO_VOLANTAZOS_MODERADO: str = "volantazos_moderado"
+HALLAZGO_TRASLADO_ALTO_SEVERO: str = "traslado_horquilla_alta_severo"
+HALLAZGO_TRASLADO_ALTO: str = "traslado_horquilla_alta"
+HALLAZGO_INSEGURIDAD_TORRE: str = "inseguridad_torre"
 
 
 # =============================================================================
@@ -260,7 +319,7 @@ def _contar_reversiones_por_amplitud(
     Un movimiento se considera "brusco/real" si su amplitud (|Δvalor|) supera
     ``amplitud_min`` o, si se aporta ``tasa_umbral``, si su tasa supera dicho umbral
     (combina tasa + amplitud, C4). Solo se tienen en cuenta movimientos con un
-    ``dt`` real (0 < dt <= ``DT_MAX``), de modo que los huecos no cuenten (C5/S1).
+    ``dt`` real (0 < dt <= ``DT_MAX``), de modo que los huecos no cuenten.
 
     Returns:
         ``(n_inversiones, segundos_acumulados)`` donde los segundos suman el ``dt``
@@ -294,70 +353,17 @@ def _contar_reversiones_por_amplitud(
     return inversiones, segundos
 
 
-def _campo(metadata: Optional[sqlite3.Row], nombre: str, default: Any) -> Any:
-    """Acceso defensivo a una columna de ``Sesiones`` (S2).
+def _campo(metadata: Optional[Dict[str, Any]], nombre: str, default: Any) -> Any:
+    """Acceso defensivo a una columna de ``Sesiones``.
 
+    ``metadata`` es el ``dict`` devuelto por :func:`core.db_manager.get_session_row`.
     Devuelve ``default`` si la fila es ``None``, si la columna no existe (BD antigua
     sin ``puntaje_depurado``/etc.) o si el valor es ``NULL``. Nunca lanza.
     """
-    if metadata is None:
+    if not metadata:
         return default
-    try:
-        valor = metadata[nombre]
-    except (IndexError, KeyError, TypeError):
-        return default
+    valor = metadata.get(nombre)
     return default if valor is None else valor
-
-
-# =============================================================================
-# CONSULTAS DE METADATOS Y EVENTOS
-# =============================================================================
-def _obtener_metadata_sesion(
-    session_id: int, conn: sqlite3.Connection
-) -> Optional[sqlite3.Row]:
-    """Devuelve la fila de ``Sesiones`` para el id dado, o ``None`` si no existe."""
-    try:
-        cur = conn.execute(
-            "SELECT * FROM Sesiones WHERE id_sesion = ?",
-            (session_id,),
-        )
-        return cur.fetchone()
-    except sqlite3.Error:
-        return None
-
-
-def _contar_colisiones(session_id: int, conn: sqlite3.Connection) -> int:
-    """Colisiones netas registradas en ``ResumenEventos`` para la sesión."""
-    try:
-        cur = conn.execute(
-            "SELECT COALESCE(SUM(conteo_eventos), 0) FROM ResumenEventos "
-            "WHERE id_sesion = ? AND tipo_evento = 'Collision'",
-            (session_id,),
-        )
-        row = cur.fetchone()
-    except sqlite3.Error:
-        return 0
-    if row is None:
-        return 0
-    valor = row[0]
-    return int(valor) if valor is not None else 0
-
-
-def _sumar_penalizaciones(session_id: int, conn: sqlite3.Connection) -> float:
-    """Suma de penalizaciones agregadas (se guardan en NEGATIVO) de la sesión."""
-    try:
-        cur = conn.execute(
-            "SELECT COALESCE(SUM(penalizaciones), 0.0) FROM ResumenEventos "
-            "WHERE id_sesion = ?",
-            (session_id,),
-        )
-        row = cur.fetchone()
-    except sqlite3.Error:
-        return 0.0
-    if row is None:
-        return 0.0
-    valor = row[0]
-    return float(valor) if valor is not None else 0.0
 
 
 # =============================================================================
@@ -368,7 +374,7 @@ def _metricas_frenado(serie: List[Tuple[float, float]]) -> Dict[str, Any]:
 
     Combina tasa (``> FRENADO_TASA_UMBRAL``) y amplitud (alcanzar ``>=
     FRENADO_VALOR_ALTO`` subiendo), agrupando muestras consecutivas en un único
-    evento (C4). ``picos_freno_alto`` mide la dureza sostenida del frenado.
+    evento. ``picos_freno_alto`` mide la dureza sostenida del frenado.
     """
     t, v = _serie_a_arrays(serie)
     if t.size < 2:
@@ -392,7 +398,7 @@ def _metricas_frenado(serie: List[Tuple[float, float]]) -> Dict[str, Any]:
 
 
 def _metricas_direccion(serie: List[Tuple[float, float]]) -> Dict[str, Any]:
-    """Volantazos como EVENTOS de inversión de giro con amplitud relevante (C4).
+    """Volantazos como EVENTOS de inversión de giro con amplitud relevante.
 
     Detecta oscilaciones bruscas de dirección (rango -14..+14) combinando tasa y
     amplitud mínima ``DIRECCION_AMPLITUD_MIN``.
@@ -418,7 +424,7 @@ def _metricas_torre(
     serie_fork: List[Tuple[float, float]],
     serie_tilt: List[Tuple[float, float]],
 ) -> Dict[str, Any]:
-    """Inseguridad en torre: microajustes (inversiones) Y tiempo acumulado (S1).
+    """Inseguridad en torre: microajustes (inversiones) Y tiempo acumulado.
 
     Se ponderan por tiempo las inversiones de dirección en ``Fork Height In Mtrs`` y
     ``Tilt Angle In Deg``, descartando huecos de muestreo (``DT_MAX``).
@@ -445,7 +451,7 @@ def _metricas_traslado_alto(
 ) -> Dict[str, Any]:
     """Traslado con horquilla alta: segundos con velocidad>0 y horquilla insegura.
 
-    Corrección C5: NO se interpola a través de huecos. Para cada muestra de
+    NO se interpola a través de huecos. Para cada muestra de
     horquilla se busca la muestra de velocidad REAL más cercana y solo se usa si
     está dentro de ``DT_MAX``; si no, la velocidad se considera 0 (sin evidencia).
     El tiempo se integra con ``dt`` hacia la siguiente muestra, descartando saltos
@@ -499,12 +505,37 @@ def _evaluar_cobertura(senales_disponibles: List[str]) -> Tuple[bool, List[str]]
     return cobertura_ok, faltantes
 
 
-def _calcular_dictamen(metricas: Dict[str, Any]) -> Tuple[str, str, str]:
+def _hallazgo(
+    codigo: str,
+    descripcion: str,
+    severidad: int,
+    valor: Any = None,
+    umbral: Any = None,
+) -> Dict[str, Any]:
+    """Construye un hallazgo estructurado (vicio detectado) JSON-serializable."""
+    return {
+        "codigo": codigo,
+        "descripcion": descripcion,
+        "severidad": int(severidad),
+        "valor": valor,
+        "umbral": umbral,
+    }
+
+
+def _calcular_dictamen(
+    metricas: Dict[str, Any],
+) -> Tuple[str, str, str, List[Dict[str, Any]], int]:
     """Combina severidad de vicios y colisiones para decidir el dictamen.
 
-    Devuelve ``(sugerencia_admision, justificacion, foco_instructor)``.
+    Devuelve ``(sugerencia_admision, justificacion, foco_instructor, hallazgos,
+    severidad_total)``.
 
-    Regla de seguridad (C1): NUNCA retorna "Apto" si la cobertura de telemetría es
+    Los ``hallazgos`` son la versión ESTRUCTURADA de los motivos del dictamen
+    (código estable + descripción + severidad + valor/umbral): permiten que la UI,
+    el generador de documentos y :mod:`core.ai_advisor` trabajen con datos en lugar
+    de interpretar texto.
+
+    Regla de seguridad: NUNCA retorna "Apto" si la cobertura de telemetría es
     inferior a ``COBERTURA_MINIMA_SENALES`` o faltan señales críticas; en ese caso
     devuelve "Observado" advirtiendo que los vicios cuentan 0 por ausencia de datos.
     """
@@ -513,13 +544,22 @@ def _calcular_dictamen(metricas: Dict[str, Any]) -> Tuple[str, str, str]:
     if not cobertura_ok:
         justificacion = (
             f"Telemetría insuficiente para certificar aptitud: solo hay "
-            f"{len(senales_disp)}/6 señales disponibles"
+            f"{len(senales_disp)}/{len(SENALES_CANONICAS)} señales disponibles"
             + (f" y faltan señales críticas ({', '.join(faltantes)})" if faltantes else "")
             + ". Los contadores de vicios valen 0 por AUSENCIA de datos, no por una "
             "conducción limpia; no es posible emitir un dictamen de aptitud fiable."
         )
         foco = "Reprocesar el PDF y verificar la extracción de telemetría antes de evaluar"
-        return "Observado", justificacion, foco
+        hallazgos = [
+            _hallazgo(
+                HALLAZGO_COBERTURA_INSUFICIENTE,
+                justificacion,
+                severidad=0,
+                valor=len(senales_disp),
+                umbral=COBERTURA_MINIMA_SENALES,
+            )
+        ]
+        return DICTAMEN_OBSERVADO, justificacion, foco, hallazgos, 0
 
     frenadas = metricas.get("frenadas_bruscas", 0)
     volantazos = metricas.get("volantazos", 0)
@@ -530,56 +570,78 @@ def _calcular_dictamen(metricas: Dict[str, Any]) -> Tuple[str, str, str]:
     varianza = metricas.get("varianza_steering", 0.0)
     picos_freno = metricas.get("picos_freno_alto", 0)
 
-    severidad = 0
-    motivos: List[str] = []
+    hallazgos: List[Dict[str, Any]] = []
 
     if colisiones >= COLISIONES_CRITICO:
-        severidad += 3
-        motivos.append(f"{colisiones} colisiones registradas")
+        hallazgos.append(_hallazgo(
+            HALLAZGO_COLISIONES_CRITICAS, f"{colisiones} colisiones registradas", 3,
+            valor=colisiones, umbral=COLISIONES_CRITICO,
+        ))
     elif colisiones >= COLISIONES_OBSERVADO:
-        severidad += 1
-        motivos.append(f"{colisiones} colisión(es) registrada(s)")
+        hallazgos.append(_hallazgo(
+            HALLAZGO_COLISIONES, f"{colisiones} colisión(es) registrada(s)", 1,
+            valor=colisiones, umbral=COLISIONES_OBSERVADO,
+        ))
 
     if frenadas >= FRENADAS_EVENTOS_ALTO:
-        severidad += 2
-        motivos.append(f"{frenadas} frenadas bruscas")
+        hallazgos.append(_hallazgo(
+            HALLAZGO_FRENADAS_ALTO, f"{frenadas} frenadas bruscas", 2,
+            valor=frenadas, umbral=FRENADAS_EVENTOS_ALTO,
+        ))
     elif frenadas >= FRENADAS_EVENTOS_MODERADO:
-        severidad += 1
-        motivos.append(f"{frenadas} frenadas bruscas")
+        hallazgos.append(_hallazgo(
+            HALLAZGO_FRENADAS_MODERADO, f"{frenadas} frenadas bruscas", 1,
+            valor=frenadas, umbral=FRENADAS_EVENTOS_MODERADO,
+        ))
 
     if picos_freno >= PICOS_FRENO_ALTO_UMBRAL:
-        severidad += 1
-        motivos.append(f"frenado sostenido/duro ({picos_freno} muestras en rango alto)")
+        hallazgos.append(_hallazgo(
+            HALLAZGO_FRENO_SOSTENIDO,
+            f"frenado sostenido/duro ({picos_freno} muestras en rango alto)", 1,
+            valor=picos_freno, umbral=PICOS_FRENO_ALTO_UMBRAL,
+        ))
 
     if volantazos >= VOLANTAZOS_EVENTOS_ALTO or varianza >= DIRECCION_VARIANZA_ALTA:
-        severidad += 2
-        motivos.append(f"{volantazos} volantazos (varianza {varianza:.1f})")
+        hallazgos.append(_hallazgo(
+            HALLAZGO_VOLANTAZOS_ALTO,
+            f"{volantazos} volantazos (varianza {varianza:.1f})", 2,
+            valor=volantazos, umbral=VOLANTAZOS_EVENTOS_ALTO,
+        ))
     elif volantazos >= VOLANTAZOS_EVENTOS_MODERADO:
-        severidad += 1
-        motivos.append(f"{volantazos} volantazos")
+        hallazgos.append(_hallazgo(
+            HALLAZGO_VOLANTAZOS_MODERADO, f"{volantazos} volantazos", 1,
+            valor=volantazos, umbral=VOLANTAZOS_EVENTOS_MODERADO,
+        ))
 
     if traslado_alto >= TRASLADO_ALTO_SEGUNDOS_ALTO:
-        severidad += 2
-        motivos.append(
+        hallazgos.append(_hallazgo(
+            HALLAZGO_TRASLADO_ALTO_SEVERO,
             f"{traslado_alto:.0f}s trasladando con horquilla por encima de "
-            f"{FORK_SAFE_THRESHOLD_MTRS:.2f} m"
-        )
+            f"{FORK_SAFE_THRESHOLD_MTRS:.2f} m", 2,
+            valor=traslado_alto, umbral=TRASLADO_ALTO_SEGUNDOS_ALTO,
+        ))
     elif traslado_alto > 0:
-        severidad += 1
-        motivos.append(f"{traslado_alto:.0f}s de traslado con horquilla alta")
+        hallazgos.append(_hallazgo(
+            HALLAZGO_TRASLADO_ALTO, f"{traslado_alto:.0f}s de traslado con horquilla alta", 1,
+            valor=traslado_alto, umbral=0.0,
+        ))
 
     if (
         microajustes >= MICROAJUSTE_INVERSIONES_ALTO
         or torre_segundos >= MICROAJUSTE_SEGUNDOS_ALTO
     ):
-        severidad += 1
-        motivos.append(
+        hallazgos.append(_hallazgo(
+            HALLAZGO_INSEGURIDAD_TORRE,
             f"inseguridad en torre ({microajustes} microajustes, "
-            f"{torre_segundos:.0f}s en régimen de duda)"
-        )
+            f"{torre_segundos:.0f}s en régimen de duda)", 1,
+            valor=microajustes, umbral=MICROAJUSTE_INVERSIONES_ALTO,
+        ))
 
-    if severidad >= 5 or colisiones >= COLISIONES_CRITICO:
-        sugerencia = "No Apto Crítico"
+    severidad = sum(h["severidad"] for h in hallazgos)
+    motivos = [h["descripcion"] for h in hallazgos]
+
+    if severidad >= SEVERIDAD_NO_APTO or colisiones >= COLISIONES_CRITICO:
+        sugerencia = DICTAMEN_NO_APTO_CRITICO
         foco = "Priorizar control de inercia, anticipación de frenada y gestión del espacio"
         cabecera = (
             "Se detectan vicios severos de manejo que comprometen la seguridad operativa."
@@ -591,16 +653,19 @@ def _calcular_dictamen(metricas: Dict[str, Any]) -> Tuple[str, str, str]:
             + " El operador presenta vicios severos y/o colisiones elevadas que "
             "comprometen la seguridad; requiere corrección intensiva antes de operar."
         )
-    elif severidad >= 2:
-        sugerencia = "Observado"
+    elif severidad >= SEVERIDAD_OBSERVADO:
+        sugerencia = DICTAMEN_OBSERVADO
         foco = "Trabajar radio de giro trasero, suavidad de mandos y control de la torre"
         justificacion = (
-            "Vicios moderados detectados: " + "; ".join(motivos) + ". "
+            ("Vicios moderados detectados: " + "; ".join(motivos) + ". ")
+            if motivos
+            else "Vicios moderados detectados. "
+        ) + (
             "El operador es admisible con seguimiento: debe corregir estos hábitos "
             "durante la formación."
         )
     else:
-        sugerencia = "Apto"
+        sugerencia = DICTAMEN_APTO
         foco = "Buen control base: afianzar hábitos normativos y productividad"
         justificacion = (
             ("Buen control base de la máquina. Observaciones menores: "
@@ -610,7 +675,20 @@ def _calcular_dictamen(metricas: Dict[str, Any]) -> Tuple[str, str, str]:
                   "críticos de manejo detectados en la telemetría. Admisible.")
         )
 
-    return sugerencia, justificacion, foco
+    return sugerencia, justificacion, foco, hallazgos, severidad
+
+
+def nivel_riesgo_por_dictamen(sugerencia: str) -> str:
+    """Traduce el dictamen de admisión a un nivel de riesgo operativo.
+
+    Mapping único del proyecto (lo consumen la UI, los documentos y
+    :mod:`core.ai_advisor`) para no reimplementar la regla de severidad.
+    """
+    if sugerencia == DICTAMEN_NO_APTO_CRITICO:
+        return RIESGO_ALTO
+    if sugerencia == DICTAMEN_APTO:
+        return RIESGO_BAJO
+    return RIESGO_MEDIO
 
 
 # =============================================================================
@@ -627,10 +705,12 @@ def evaluar_diagnostico_inicial(
 
     Returns:
         Dict con claves ``sugerencia_admision``, ``justificacion``,
-        ``foco_instructor``, ``metricas_calculadas`` y ``series``. Tolera sesiones
-        inexistentes y señales ausentes devolviendo valores por defecto coherentes.
+        ``foco_instructor``, ``nivel_riesgo``, ``hallazgos`` (lista estructurada de
+        vicios detectados), ``severidad_total``, ``metricas_calculadas`` y
+        ``series``. Tolera sesiones inexistentes y señales ausentes devolviendo
+        valores por defecto coherentes.
     """
-    metadata = _obtener_metadata_sesion(session_id, conn)
+    metadata = get_session_row(conn, session_id)
     series = _cargar_series(session_id, conn)
 
     m_frenado = _metricas_frenado(series.get(SENAL_BRAKE, []))
@@ -642,9 +722,9 @@ def evaluar_diagnostico_inicial(
         series.get(SENAL_FORK_HEIGHT, []), series.get(SENAL_SPEED, [])
     )
 
-    colisiones = _contar_colisiones(session_id, conn)
+    colisiones = sumar_eventos_por_tipo(conn, session_id, TIPO_EVENTO_COLISION)
 
-    # --- Tiempo total (S2: acceso defensivo a columnas) ---
+    # --- Tiempo total (acceso defensivo a columnas) ---
     tiempo_total = float(_campo(metadata, "duracion_segundos", 0.0) or 0.0)
     if tiempo_total <= 0.0:
         finales = [s[-1][0] for s in series.values() if s]
@@ -679,23 +759,28 @@ def evaluar_diagnostico_inicial(
         "senales_disponibles": [s for s in SENALES_CANONICAS if series.get(s)],
     }
 
-    # --- Dictamen con control de cobertura (C1) ---
+    # --- Dictamen con control de cobertura ---
     if metadata is None:
-        sugerencia = "Observado"
+        sugerencia = DICTAMEN_OBSERVADO
         justificacion = (
             f"La sesión {session_id} no existe en la base de datos o no tiene "
             "metadatos; no es posible emitir un dictamen definitivo. Se marca como "
             "'Observado' por falta de información."
         )
         foco = "Verificar la carga del reporte PDF antes de evaluar"
+        hallazgos = [_hallazgo(HALLAZGO_SESION_INEXISTENTE, justificacion, 0, valor=session_id)]
+        severidad_total = 0
     else:
         # _calcular_dictamen ya degrada a "Observado" si la cobertura es insuficiente.
-        sugerencia, justificacion, foco = _calcular_dictamen(metricas)
+        sugerencia, justificacion, foco, hallazgos, severidad_total = _calcular_dictamen(metricas)
 
     return {
         "sugerencia_admision": sugerencia,
         "justificacion": justificacion,
         "foco_instructor": foco,
+        "nivel_riesgo": nivel_riesgo_por_dictamen(sugerencia),
+        "hallazgos": hallazgos,
+        "severidad_total": int(severidad_total),
         "metricas_calculadas": metricas,
         "series": series,
     }
@@ -719,7 +804,7 @@ def _puntaje_depurado_derivado(puntaje_final: float, penalizaciones: float) -> f
 
 
 def _delta_pct(nuevo: float, anterior: float) -> Optional[float]:
-    """Variación porcentual de ``anterior`` a ``nuevo`` (C6).
+    """Variación porcentual de ``anterior`` a ``nuevo``.
 
     Reglas:
       * ``anterior == 0`` y ``nuevo == 0`` -> ``0.0`` (sin cambio).
@@ -732,28 +817,27 @@ def _delta_pct(nuevo: float, anterior: float) -> Optional[float]:
     return round(((nuevo - anterior) / abs(anterior)) * 100.0, 2)
 
 
-def _fmt_pct(pct: Optional[float]) -> str:
-    """Formatea un porcentaje opcional para texto/tablas ("n/a" si es None)."""
-    return "n/a" if pct is None else f"{pct:+.1f}%"
+def veredicto_por_delta_puntaje(delta: float) -> str:
+    """Clasifica la evolución a partir del delta de puntaje depurado.
 
+    Regla única del proyecto (la reutiliza ``core.report_generator``)::
 
-def _veredicto_por_delta_puntaje(delta: float) -> str:
-    """Reutiliza los umbrales de ``report_generator.generar_veredicto``.
-
-    ``> 15`` MEJORA SIGNIFICATIVA · ``> 1`` MEJORA MODERADA · ``< -1`` REGRESIÓN
-    DETECTADA · resto RENDIMIENTO ESTANCADO.
+        delta > UMBRAL_MEJORA_SIGNIFICATIVA  -> MEJORA SIGNIFICATIVA
+        delta > UMBRAL_MEJORA_MODERADA       -> MEJORA MODERADA
+        delta < UMBRAL_REGRESION             -> REGRESIÓN DETECTADA
+        resto                                -> RENDIMIENTO ESTANCADO
     """
-    if delta > 15:
-        return "MEJORA SIGNIFICATIVA"
-    if delta > 1:
-        return "MEJORA MODERADA"
-    if delta < -1:
-        return "REGRESIÓN DETECTADA"
-    return "RENDIMIENTO ESTANCADO"
+    if delta > UMBRAL_MEJORA_SIGNIFICATIVA:
+        return VEREDICTO_MEJORA_SIGNIFICATIVA
+    if delta > UMBRAL_MEJORA_MODERADA:
+        return VEREDICTO_MEJORA_MODERADA
+    if delta < UMBRAL_REGRESION:
+        return VEREDICTO_REGRESION
+    return VEREDICTO_ESTANCADO
 
 
 def _deltas_cero() -> Dict[str, Any]:
-    """Estructura de deltas neutra (todo 0 / None) para respuestas de error (C3)."""
+    """Estructura de deltas neutra (todo 0 / None) para respuestas de error."""
     return {
         "duracion_seg": 0.0,
         "duracion_pct": None,
@@ -776,13 +860,13 @@ def comparar_sesiones_delta(
     """Compara una sesión diagnóstica (Pre) con una final (Post).
 
     Si alguna de las dos sesiones NO existe en la BD, devuelve un dict con
-    ``error`` y ``veredicto_evolucion="SIN DATOS"`` y deltas neutros (C3), en lugar
-    de fabricar una mejora falsa.
+    ``error`` y ``veredicto_evolucion="SIN DATOS"`` y deltas neutros, en lugar de
+    fabricar una mejora falsa.
 
     Returns:
         Dict con claves ``pre``, ``post``, ``deltas``, ``series_pre``,
-        ``series_post``, ``veredicto_evolucion``, ``resumen_evolucion`` (y ``error``
-        solo cuando aplica).
+        ``series_post``, ``veredicto_evolucion``, ``mejoras`` y ``retrocesos``
+        (y ``error`` solo cuando aplica). Todas las claves son JSON-serializables.
     """
     diag_pre = evaluar_diagnostico_inicial(session_id_pre, conn)
     diag_post = evaluar_diagnostico_inicial(session_id_post, conn)
@@ -790,7 +874,7 @@ def comparar_sesiones_delta(
     existe_pre = bool(diag_pre["metricas_calculadas"].get("sesion_existente"))
     existe_post = bool(diag_post["metricas_calculadas"].get("sesion_existente"))
 
-    # --- Validación de existencia (C3) ---
+    # --- Validación de existencia ---
     if not existe_pre or not existe_post:
         faltan = []
         if not existe_pre:
@@ -799,6 +883,7 @@ def comparar_sesiones_delta(
             faltan.append(str(session_id_post))
         return {
             "error": "Alguna de las sesiones no existe en la base de datos",
+            "sesiones_faltantes": faltan,
             "pre": {
                 "session_id": session_id_pre,
                 "metricas": diag_pre["metricas_calculadas"],
@@ -816,16 +901,13 @@ def comparar_sesiones_delta(
             "deltas": _deltas_cero(),
             "series_pre": diag_pre["series"],
             "series_post": diag_post["series"],
-            "veredicto_evolucion": "SIN DATOS",
-            "resumen_evolucion": (
-                "No se puede comparar la evolución: la(s) sesión(es) "
-                + ", ".join(faltan)
-                + " no existe(n) en la base de datos."
-            ),
+            "veredicto_evolucion": VEREDICTO_SIN_DATOS,
+            "mejoras": [],
+            "retrocesos": [],
         }
 
-    pen_pre = _sumar_penalizaciones(session_id_pre, conn)
-    pen_post = _sumar_penalizaciones(session_id_post, conn)
+    pen_pre = sumar_penalizaciones(conn, session_id_pre)
+    pen_post = sumar_penalizaciones(conn, session_id_post)
 
     pd_pre = _puntaje_depurado_derivado(
         diag_pre["metricas_calculadas"].get("puntaje_final", 0.0), pen_pre
@@ -846,7 +928,7 @@ def comparar_sesiones_delta(
     vol_pre = int(diag_pre["metricas_calculadas"].get("volantazos", 0))
     vol_post = int(diag_post["metricas_calculadas"].get("volantazos", 0))
 
-    # Suavidad calculada SOBRE TOTALES (C7): no se suman porcentajes independientes.
+    # Suavidad calculada SOBRE TOTALES: no se suman porcentajes independientes.
     sua_pre = fren_pre + vol_pre
     sua_post = fren_post + vol_post
 
@@ -881,8 +963,8 @@ def comparar_sesiones_delta(
         "puntaje_depurado_pct": _delta_pct(pd_post, pd_pre),
     }
 
-    veredicto = _veredicto_por_delta_puntaje(delta_puntaje)
-    resumen = _construir_resumen_evolucion(bloque_pre, bloque_post, deltas, veredicto)
+    veredicto = veredicto_por_delta_puntaje(delta_puntaje)
+    mejoras, retrocesos = _clasificar_cambios(bloque_pre, bloque_post, deltas)
 
     return {
         "pre": bloque_pre,
@@ -891,99 +973,103 @@ def comparar_sesiones_delta(
         "series_pre": diag_pre["series"],
         "series_post": diag_post["series"],
         "veredicto_evolucion": veredicto,
-        "resumen_evolucion": resumen,
+        "mejoras": mejoras,
+        "retrocesos": retrocesos,
     }
 
 
-def _construir_resumen_evolucion(
+def _clasificar_cambios(
     pre: Dict[str, Any],
     post: Dict[str, Any],
     deltas: Dict[str, Any],
-    veredicto: str,
-) -> str:
-    """Redacta el resumen de evolución técnica en español, listo para el alumno."""
-    def signo(valor: float) -> str:
-        return f"+{valor:.2f}" if valor >= 0 else f"{valor:.2f}"
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Clasifica cada métrica comparada en mejora o retroceso.
 
-    lineas = [
-        "RESUMEN DE EVOLUCIÓN TÉCNICA DEL OPERADOR",
-        "=" * 46,
-        "",
-        f"Veredicto general: {veredicto}",
-        "",
-        "Métrica                     Día 1        Día Final     Variación",
-        "-" * 66,
+    Devuelve estructuras NATIVAS (listas de dicts JSON-serializables) en lugar de
+    texto preformateado: la presentación (tabla, PDF, tarjeta de UI) la decide cada
+    consumidor. Cada elemento contiene ``metrica``, ``pre``, ``post``, ``delta``,
+    ``pct`` y ``sentido``. Las métricas con delta 0 no se listan (rendimiento
+    estable en ese aspecto).
+    """
+    m_pre = pre.get("metricas", {}) or {}
+    m_post = post.get("metricas", {}) or {}
+
+    suavidad_pre = int(m_pre.get("frenadas_bruscas", 0)) + int(m_pre.get("volantazos", 0))
+    suavidad_post = int(m_post.get("frenadas_bruscas", 0)) + int(m_post.get("volantazos", 0))
+
+    comparables: List[Tuple[str, Any, Any, Any, Optional[float], str]] = [
         (
-            f"Puntaje depurado           {pre['puntaje_depurado']:>8.2f}    "
-            f"{post['puntaje_depurado']:>8.2f}    {signo(deltas['puntaje_depurado'])} "
-            f"({_fmt_pct(deltas['puntaje_depurado_pct'])})"
+            "Puntaje depurado",
+            float(pre.get("puntaje_depurado", 0.0)),
+            float(post.get("puntaje_depurado", 0.0)),
+            deltas.get("puntaje_depurado", 0.0),
+            deltas.get("puntaje_depurado_pct"),
+            MAYOR_ES_MEJOR,
         ),
         (
-            f"Colisiones                 {pre['metricas'].get('colisiones_netas', 0):>8d}    "
-            f"{post['metricas'].get('colisiones_netas', 0):>8d}    "
-            f"{deltas['colisiones']:+d} ({_fmt_pct(deltas['colisiones_pct'])})"
+            "Colisiones",
+            int(m_pre.get("colisiones_netas", 0)),
+            int(m_post.get("colisiones_netas", 0)),
+            deltas.get("colisiones", 0),
+            deltas.get("colisiones_pct"),
+            MENOR_ES_MEJOR,
         ),
         (
-            f"Frenadas bruscas           {pre['metricas'].get('frenadas_bruscas', 0):>8d}    "
-            f"{post['metricas'].get('frenadas_bruscas', 0):>8d}    "
-            f"{deltas['frenadas_bruscas']:+d} ({_fmt_pct(deltas['frenadas_bruscas_pct'])})"
+            "Frenadas bruscas",
+            int(m_pre.get("frenadas_bruscas", 0)),
+            int(m_post.get("frenadas_bruscas", 0)),
+            deltas.get("frenadas_bruscas", 0),
+            deltas.get("frenadas_bruscas_pct"),
+            MENOR_ES_MEJOR,
         ),
         (
-            f"Volantazos                 {pre['metricas'].get('volantazos', 0):>8d}    "
-            f"{post['metricas'].get('volantazos', 0):>8d}    "
-            f"{deltas['volantazos']:+d} ({_fmt_pct(deltas['volantazos_pct'])})"
+            "Volantazos",
+            int(m_pre.get("volantazos", 0)),
+            int(m_post.get("volantazos", 0)),
+            deltas.get("volantazos", 0),
+            deltas.get("volantazos_pct"),
+            MENOR_ES_MEJOR,
         ),
         (
-            f"Suavidad (fren.+volant.)   "
-            f"{pre['metricas'].get('frenadas_bruscas', 0) + pre['metricas'].get('volantazos', 0):>8d}    "
-            f"{post['metricas'].get('frenadas_bruscas', 0) + post['metricas'].get('volantazos', 0):>8d}    "
-            f"{deltas['suavidad']:+d} ({_fmt_pct(deltas['suavidad_pct'])})"
+            "Suavidad (frenadas + volantazos)",
+            suavidad_pre,
+            suavidad_post,
+            deltas.get("suavidad", 0),
+            deltas.get("suavidad_pct"),
+            MENOR_ES_MEJOR,
         ),
         (
-            f"Duración (s)               {pre['duracion_segundos']:>8.1f}    "
-            f"{post['duracion_segundos']:>8.1f}    {signo(deltas['duracion_seg'])} "
-            f"({_fmt_pct(deltas['duracion_pct'])})"
+            "Duración (s)",
+            float(pre.get("duracion_segundos", 0.0)),
+            float(post.get("duracion_segundos", 0.0)),
+            deltas.get("duracion_seg", 0.0),
+            deltas.get("duracion_pct"),
+            MENOR_ES_MEJOR,
         ),
-        "",
-        "-" * 66,
-        f"Perfil inicial: {pre['perfil']}    |    Perfil final: {post['perfil']}",
-        "",
     ]
 
-    mejoras: List[str] = []
-    retrocesos: List[str] = []
-    if deltas["colisiones"] < 0:
-        mejoras.append(f"reducción de colisiones ({deltas['colisiones']:+d})")
-    elif deltas["colisiones"] > 0:
-        retrocesos.append(f"aumento de colisiones ({deltas['colisiones']:+d})")
-
-    if deltas["frenadas_bruscas"] < 0:
-        mejoras.append(f"menos frenadas bruscas ({deltas['frenadas_bruscas']:+d})")
-    elif deltas["frenadas_bruscas"] > 0:
-        retrocesos.append(f"más frenadas bruscas ({deltas['frenadas_bruscas']:+d})")
-
-    if deltas["volantazos"] < 0:
-        mejoras.append(f"dirección más suave ({deltas['volantazos']:+d} volantazos)")
-    elif deltas["volantazos"] > 0:
-        retrocesos.append(f"dirección más nerviosa ({deltas['volantazos']:+d} volantazos)")
-
-    if mejoras:
-        lineas.append("Aspectos positivos: " + "; ".join(mejoras) + ".")
-    if retrocesos:
-        lineas.append("Aspectos a reforzar: " + "; ".join(retrocesos) + ".")
-    if not mejoras and not retrocesos:
-        lineas.append(
-            "El rendimiento se mantiene estable entre ambas sesiones: consolidar "
-            "los hábitos adquiridos y buscar mayor fluidez operativa."
-        )
-
-    return "\n".join(lineas)
+    mejoras: List[Dict[str, Any]] = []
+    retrocesos: List[Dict[str, Any]] = []
+    for etiqueta, valor_pre, valor_post, delta, pct, sentido in comparables:
+        if not delta:
+            continue
+        mejoro = delta > 0 if sentido == MAYOR_ES_MEJOR else delta < 0
+        item = {
+            "metrica": etiqueta,
+            "pre": valor_pre,
+            "post": valor_post,
+            "delta": delta,
+            "pct": pct,
+            "sentido": sentido,
+        }
+        (mejoras if mejoro else retrocesos).append(item)
+    return mejoras, retrocesos
 
 
 # =============================================================================
 # API PÚBLICA — C) PERSISTENCIA DE LA DECISIÓN DEL INSTRUCTOR
 # =============================================================================
-# Definición con UNIQUE(id_sesion) y ON DELETE CASCADE (C2), coherente con
+# Definición con UNIQUE(id_sesion) y ON DELETE CASCADE, coherente con
 # ResumenEventos/Telemetria. Permite un upsert limpio de 1 fila por sesión.
 _SQL_CREAR_TABLA_DECISION = """
 CREATE TABLE IF NOT EXISTS DecisionInstructor (
@@ -1011,7 +1097,7 @@ def asegurar_tabla_decision_instructor(conn: sqlite3.Connection) -> bool:
         conn.commit()
         return True
     except sqlite3.Error as exc:
-        print(f"[asegurar_tabla_decision_instructor] Error de BD: {exc}")
+        logger.error("No se pudo crear la tabla DecisionInstructor: %s", exc)
         return False
 
 
@@ -1024,7 +1110,7 @@ def guardar_decision_instructor(
 ) -> bool:
     """Persiste la decisión del instructor para una sesión (UPSERT no destructivo).
 
-    Estrategia (C2): UPDATE de la fila existente de la sesión; si no existía
+    Estrategia: UPDATE de la fila existente de la sesión; si no existía
     (``rowcount == 0``) se INSERTa. Mantiene exactamente 1 fila por sesión SIN
     borrar destructivamente con DELETE previo.
 
@@ -1049,7 +1135,7 @@ def guardar_decision_instructor(
         conn.commit()
         return True
     except sqlite3.Error as exc:
-        print(f"[guardar_decision_instructor] Error de BD: {exc}")
+        logger.error("No se pudo guardar la decisión de la sesión %s: %s", session_id, exc)
         conn.rollback()
         return False
 
@@ -1059,9 +1145,9 @@ def obtener_decision_instructor(
 ) -> Optional[Dict[str, Any]]:
     """Devuelve la decisión guardada del instructor para la sesión, o ``None``.
 
-    Operación de SOLO LECTURA (C9): no crea la tabla ni hace commit. Si la tabla no
+    Operación de SOLO LECTURA: no crea la tabla ni hace commit. Si la tabla no
     existe todavía o hay cualquier error de BD, devuelve ``None`` sin efectos
-    secundarios. Funciona con y sin ``row_factory=sqlite3.Row`` (S3).
+    secundarios. Funciona con y sin ``row_factory=sqlite3.Row``.
     """
     try:
         cur = conn.execute(
@@ -1081,7 +1167,60 @@ def obtener_decision_instructor(
 
 
 # =============================================================================
-# API PÚBLICA — D) PAYLOAD JSON-SERIALIZABLE PARA LLM EXTERNA
+# API PÚBLICA — D) DATOS DE NEGOCIO PARA DOCUMENTOS (PDF / TEXTO)
+# =============================================================================
+def obtener_datos_documento_sesion(
+    session_id: int, conn: sqlite3.Connection
+) -> Dict[str, Any]:
+    """Datos saneados de una sesión para generar documentos (PDF/texto).
+
+    Concentra el saneado que antes estaba disperso en los frontends: garantiza
+    numéricos en ``0``/``0.0`` y textos en ``"N/A"`` para que el generador de
+    documentos nunca falle por ``None``, e incorpora las magnitudes derivadas de
+    negocio (``penalizaciones_totales`` y ``puntaje_depurado``).
+
+    Returns:
+        Dict plano JSON-serializable. Si la sesión no existe, devuelve la
+        estructura con valores neutros y ``existe=False``.
+    """
+    metadata = get_session_row(conn, session_id)
+    penalizaciones = sumar_penalizaciones(conn, session_id)
+    puntaje_final = _a_float(_campo(metadata, "puntaje_final", 0.0))
+    return {
+        "id_sesion": int(session_id),
+        "existe": metadata is not None,
+        "nombre_operador": _a_str(_campo(metadata, "nombre_operador", "N/A")),
+        "nombre_clase": _a_str(_campo(metadata, "nombre_clase", "N/A")),
+        "nombre_ejercicio": _a_str(_campo(metadata, "nombre_ejercicio", "N/A")),
+        "nombre_archivo_origen": _a_str(_campo(metadata, "nombre_archivo_origen", "N/A")),
+        "fecha_hora_inicio": _a_str(_campo(metadata, "fecha_hora_inicio", "N/A")),
+        "perfil_operador": _a_str(_campo(metadata, "perfil_operador", "N/A")),
+        "duracion_segundos": _a_float(_campo(metadata, "duracion_segundos", 0.0)),
+        "puntaje_final": puntaje_final,
+        "penalizaciones_totales": penalizaciones,
+        "puntaje_depurado": round(_puntaje_depurado_derivado(puntaje_final, penalizaciones), 2),
+    }
+
+
+def obtener_datos_evolucion(
+    session_id_pre: int, session_id_post: int, conn: sqlite3.Connection
+) -> Dict[str, Any]:
+    """Paquete completo para el reporte de evolución (datos + comparativa).
+
+    Returns:
+        Dict con ``datos_iniciales``, ``datos_finales`` (ambos listos para
+        :func:`core.report_generator.crear_reporte_evolucion_pdf`) y
+        ``comparativa`` (salida de :func:`comparar_sesiones_delta`).
+    """
+    return {
+        "datos_iniciales": obtener_datos_documento_sesion(session_id_pre, conn),
+        "datos_finales": obtener_datos_documento_sesion(session_id_post, conn),
+        "comparativa": comparar_sesiones_delta(session_id_pre, session_id_post, conn),
+    }
+
+
+# =============================================================================
+# API PÚBLICA — E) PAYLOAD JSON-SERIALIZABLE PARA LLM EXTERNA
 # =============================================================================
 def _a_float(valor: Any, default: float = 0.0) -> float:
     """Convierte ``valor`` a ``float`` nativo de Python de forma defensiva.
@@ -1119,69 +1258,81 @@ def _a_str(valor: Any, default: str = "N/A") -> str:
 
 
 def obtener_payload_para_llm(
-    session_id_pre: int, session_id_post: int, conn: sqlite3.Connection
+    session_id_pre: int,
+    conn: sqlite3.Connection,
+    session_id_post: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Construye un payload 100 % serializable a JSON para una API LLM externa.
+    """Construye un payload 100 % serializable a JSON para :mod:`core.ai_advisor`.
 
     Agrega, en un único dict plano y sin tipos exóticos (nada de numpy, ``datetime``
     sin convertir, ``set`` o ``None``), la información de admisión de la sesión
-    diagnóstica (Pre), de la sesión final (Post) y de su comparativa de evolución.
+    diagnóstica (Pre) y, si se aporta ``session_id_post``, la de la sesión final
+    (Post) junto con su comparativa de evolución.
 
-    La función es de SOLO LECTURA: reutiliza :func:`evaluar_diagnostico_inicial`
-    (para ambas sesiones) y :func:`comparar_sesiones_delta` (para la evolución),
-    sin modificar el comportamiento de las APIs públicas existentes.
+    La función es de SOLO LECTURA: reutiliza :func:`evaluar_diagnostico_inicial` y
+    :func:`comparar_sesiones_delta`.
 
     Tolerancia a fallos:
-      * Si ``session_id_post`` no existe, se devuelve el payload únicamente con los
-        datos de Pre; los campos de Post quedan en ``0`` / ``"N/A"`` y el veredicto
-        de evolución en ``"SIN DATOS"`` (nunca se fabrica una mejora falsa).
-      * Cualquier métrica ausente (señal de telemetría faltante, columna inexistente,
-        porcentaje no definido) se degrada a ``0`` / ``0.0`` / ``"N/A"``, nunca a
+      * Si ``session_id_post`` es ``None`` se devuelve únicamente el diagnóstico de
+        admisión (sin bloque ``evolucion``).
+      * Si ``session_id_post`` no existe, los campos de Post quedan en ``0`` /
+        ``"N/A"`` y el veredicto de evolución en ``"SIN DATOS"`` (nunca se fabrica
+        una mejora falsa).
+      * Cualquier métrica ausente se degrada a ``0`` / ``0.0`` / ``"N/A"``, nunca a
         ``None`` que rompería el contrato JSON.
 
     Args:
         session_id_pre: identificador de la sesión diagnóstica (Día 1).
-        session_id_post: identificador de la sesión final (Día Final).
         conn: conexión SQLite abierta (idealmente con ``row_factory=sqlite3.Row``).
+        session_id_post: identificador de la sesión final (Día Final), opcional.
 
     Returns:
-        Dict con las claves ``metadatos``, ``fisicas_clave`` y ``diagnostico``,
-        listo para ``json.dumps`` sin argumentos por defecto.
+        Dict con las claves ``metadatos``, ``fisicas_clave``, ``metricas``,
+        ``diagnostico`` y (opcionalmente) ``evolucion``, listo para ``json.dumps``.
     """
-    # --- Diagnósticos independientes de cada sesión (tolerantes a inexistentes) ---
+    # --- Diagnóstico de la sesión Pre (tolerante a inexistente) ---
     diag_pre = evaluar_diagnostico_inicial(session_id_pre, conn)
-    diag_post = evaluar_diagnostico_inicial(session_id_post, conn)
     metricas_pre = diag_pre.get("metricas_calculadas", {}) or {}
-    metricas_post = diag_post.get("metricas_calculadas", {}) or {}
-
     existe_pre = bool(metricas_pre.get("sesion_existente"))
-    existe_post = bool(metricas_post.get("sesion_existente"))
 
-    # --- Comparativa de evolución (nunca lanza; degrada a "SIN DATOS") ---
-    delta = comparar_sesiones_delta(session_id_pre, session_id_post, conn)
+    con_comparativa = session_id_post is not None
+    if con_comparativa:
+        diag_post = evaluar_diagnostico_inicial(session_id_post, conn)
+        metricas_post = diag_post.get("metricas_calculadas", {}) or {}
+        existe_post = bool(metricas_post.get("sesion_existente"))
+        # Nunca lanza: degrada a "SIN DATOS" si alguna sesión no existe.
+        delta = comparar_sesiones_delta(session_id_pre, session_id_post, conn)
+    else:
+        diag_post, metricas_post = {}, {}
+        existe_post = False
+        delta = {}
     deltas = delta.get("deltas", {}) or {}
 
-    # --- Metadatos de la sesión Pre (operador / ejercicio) desde ``Sesiones`` ---
-    meta_pre = _obtener_metadata_sesion(session_id_pre, conn)
-    meta_post = _obtener_metadata_sesion(session_id_post, conn)
+    # --- Metadatos de la sesión (operador / ejercicio) desde ``Sesiones`` ---
+    meta_pre = get_session_row(conn, session_id_pre)
+    meta_post = get_session_row(conn, session_id_post) if con_comparativa else None
     # El operador/ejercicio se toman de Pre; si Pre no existe, se intenta con Post.
     meta_fuente = meta_pre if meta_pre is not None else meta_post
     operador = _a_str(_campo(meta_fuente, "nombre_operador", "N/A"))
     ejercicio = _a_str(_campo(meta_fuente, "nombre_ejercicio", "N/A"))
 
-    # --- Duraciones y delta de puntaje (nativos, nunca None) ---
-    duracion_pre = _a_float(metricas_pre.get("tiempo_total_segundos", 0.0))
-    duracion_post = _a_float(metricas_post.get("tiempo_total_segundos", 0.0))
-    delta_puntaje = _a_float(deltas.get("puntaje_depurado", 0.0))
-    delta_puntaje_pct = _a_float(deltas.get("puntaje_depurado_pct"), default=0.0)
-
     metadatos: Dict[str, Any] = {
         "operador": operador,
         "ejercicio": ejercicio,
-        "duracion_pre_segundos": round(duracion_pre, 2),
-        "duracion_post_segundos": round(duracion_post, 2),
-        "delta_puntaje": round(delta_puntaje, 2),
-        "delta_puntaje_pct": round(delta_puntaje_pct, 2),
+        "session_id_pre": int(session_id_pre),
+        "session_id_post": int(session_id_post) if con_comparativa else None,
+        "duracion_pre_segundos": round(
+            _a_float(metricas_pre.get("tiempo_total_segundos", 0.0)), 2
+        ),
+        "duracion_post_segundos": round(
+            _a_float(metricas_post.get("tiempo_total_segundos", 0.0)), 2
+        ),
+        "delta_puntaje": round(_a_float(deltas.get("puntaje_depurado", 0.0)), 2),
+        "delta_puntaje_pct": round(
+            _a_float(deltas.get("puntaje_depurado_pct"), default=0.0), 2
+        ),
+        "perfil_pre": _a_str(metricas_pre.get("perfil_operador", "N/A")),
+        "perfil_post": _a_str(metricas_post.get("perfil_operador", "N/A")),
     }
 
     fisicas_clave: Dict[str, Any] = {
@@ -1191,6 +1342,12 @@ def obtener_payload_para_llm(
         "volantazos_post": _a_int(metricas_post.get("volantazos", 0)),
         "colisiones_netas_pre": _a_int(metricas_pre.get("colisiones_netas", 0)),
         "colisiones_netas_post": _a_int(metricas_post.get("colisiones_netas", 0)),
+        "inseguridad_torre_microajustes_pre": _a_int(
+            metricas_pre.get("inseguridad_torre_microajustes", 0)
+        ),
+        "inseguridad_torre_microajustes_post": _a_int(
+            metricas_post.get("inseguridad_torre_microajustes", 0)
+        ),
         "tiempo_horquilla_alta_pre_seg": round(
             _a_float(metricas_pre.get("traslado_horquilla_alta_segundos", 0.0)), 2
         ),
@@ -1201,31 +1358,50 @@ def obtener_payload_para_llm(
 
     diagnostico: Dict[str, Any] = {
         "sugerencia_admision_pre": _a_str(diag_pre.get("sugerencia_admision", "N/A")),
-        "sugerencia_admision_post": _a_str(diag_post.get("sugerencia_admision", "N/A")),
-        "veredicto_evolucion": _a_str(delta.get("veredicto_evolucion", "SIN DATOS")),
-        # El foco del instructor se toma de la sesión diagnóstica (Pre): es el punto
-        # de partida pedagógico. Si Post no existe, sigue siendo coherente.
+        "justificacion_pre": _a_str(diag_pre.get("justificacion", "N/A")),
+        "nivel_riesgo_pre": _a_str(diag_pre.get("nivel_riesgo", "N/A")),
+        "hallazgos_pre": list(diag_pre.get("hallazgos", []) or []),
         "foco_instructor": _a_str(
             diag_pre.get("foco_instructor") or diag_post.get("foco_instructor"), "N/A"
         ),
+        "senales_disponibles_pre": list(metricas_pre.get("senales_disponibles", []) or []),
     }
+    if con_comparativa:
+        diagnostico["sugerencia_admision_post"] = _a_str(
+            diag_post.get("sugerencia_admision", "N/A")
+        )
+        diagnostico["justificacion_post"] = _a_str(diag_post.get("justificacion", "N/A"))
+        diagnostico["nivel_riesgo_post"] = _a_str(diag_post.get("nivel_riesgo", "N/A"))
+        diagnostico["hallazgos_post"] = list(diag_post.get("hallazgos", []) or [])
+        diagnostico["senales_disponibles_post"] = list(
+            metricas_post.get("senales_disponibles", []) or []
+        )
 
     payload: Dict[str, Any] = {
         "metadatos": metadatos,
         "fisicas_clave": fisicas_clave,
+        "metricas": {"pre": metricas_pre, "post": metricas_post},
         "diagnostico": diagnostico,
     }
 
-    # Aviso explícito cuando falta la sesión Post (payload solo con datos de Pre).
-    if not existe_post:
-        payload["advertencia"] = (
-            f"La sesión Post ({session_id_post}) no existe en la base de datos; "
-            "el payload refleja únicamente los datos de la sesión Pre."
-        )
-    elif not existe_pre:
+    if con_comparativa:
+        payload["evolucion"] = {
+            "veredicto": _a_str(delta.get("veredicto_evolucion", VEREDICTO_SIN_DATOS)),
+            "deltas": deltas,
+            "mejoras": delta.get("mejoras", []) or [],
+            "retrocesos": delta.get("retrocesos", []) or [],
+        }
+
+    # Avisos explícitos de cobertura (nunca se fabrican datos).
+    if not existe_pre:
         payload["advertencia"] = (
             f"La sesión Pre ({session_id_pre}) no existe en la base de datos; "
             "los valores de Pre son neutros (0 / N/A)."
+        )
+    elif con_comparativa and not existe_post:
+        payload["advertencia"] = (
+            f"La sesión Post ({session_id_post}) no existe en la base de datos; "
+            "el payload refleja únicamente los datos de la sesión Pre."
         )
 
     return payload

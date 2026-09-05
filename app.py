@@ -30,7 +30,9 @@ from core.pipeline import process_simulator_pdf
 from core.reporter import generar_reporte_evolucion, generar_texto_reporte_individual
 from core.behavior_analyzer import analizar_comportamiento_completo
 from core.report_generator import crear_reporte_pdf
-from core.plotter import dibujar_grafico_telemetria
+# El plotter vive en la capa ``ui`` (depende de customtkinter / TkAgg): ``core/``
+# queda agnóstico de cualquier biblioteca de interfaz gráfica.
+from ui.plotter import dibujar_grafico_telemetria
 
 
 # =============================================================================

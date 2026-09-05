@@ -37,7 +37,6 @@ protobuf==6.32.0
 pyarrow==21.0.0
 pycparser==2.22
 pydeck==0.9.1
-PyMuPDF==1.26.4
 pyparsing==3.2.3
 pypdfium2==4.30.0
 pytesseract==0.3.13

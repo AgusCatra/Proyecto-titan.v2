@@ -1,15 +1,18 @@
 # streamlit_app.py
-# Proyecto Titán v2.3 — Interfaz web definitiva (Streamlit).
+# Proyecto Titán — Interfaz web (Streamlit): CAPA DE PRESENTACIÓN.
 #
 # Dos pestañas de trabajo (Diagnóstico de Admisión y Comparativa Delta),
 # persistencia con st.session_state, caché de cálculos pesados y gráficos
 # interactivos con PLOTLY.
 #
-# La lógica de evaluación vive en core.evaluador_diagnostico (lógica pura); esta
-# capa solo orquesta la UI, la ingesta de PDFs y la visualización.
+# Reglas de esta capa (arquitectura API-ready):
+#   * NO contiene reglas de negocio pedagógicas: viven en core.evaluador_diagnostico.
+#   * NO contiene SQL: el acceso a datos vive en core.db_manager.
+#   * NO genera documentos: la exportación PDF vive en core.report_generator.
+#   * NO redacta devoluciones: el asesor LLM vive en core.ai_advisor.
+#   * Solo orquesta vistas y componentes consumiendo funciones de ``core/``.
 
 import html
-import io
 import os
 import shutil
 import sys
@@ -27,37 +30,54 @@ if project_root not in sys.path:
 
 # --- Importaciones del núcleo ---
 from core.pipeline import process_simulator_pdf
-from core.db_manager import get_db_connection
+from core.db_manager import get_db_connection, list_sessions
 # Import DEFENSIVO: core.report_generator depende de 'fpdf' (fpdf2), que puede no
 # estar instalado en el entorno. Si falta, la app DEBE seguir arrancando y solo se
 # deshabilita la exportación a PDF, nunca se cae con ModuleNotFoundError.
 try:
-    from core.report_generator import crear_reporte_pdf, crear_reporte_evolucion_pdf
+    from core.report_generator import generar_pdf_diagnostico, generar_pdf_evolucion
     PDF_EXPORT_AVAILABLE = True
 except ImportError:
-    crear_reporte_pdf = None
-    crear_reporte_evolucion_pdf = None
+    generar_pdf_diagnostico = None
+    generar_pdf_evolucion = None
     PDF_EXPORT_AVAILABLE = False
 from core.evaluador_diagnostico import (
-    evaluar_diagnostico_inicial,
+    DICTAMEN_APTO,
+    DICTAMEN_NO_APTO_CRITICO,
+    DICTAMEN_OBSERVADO,
+    RIESGO_ALTO,
+    RIESGO_BAJO,
+    RIESGO_MEDIO,
+    SENALES_CANONICAS,
+    VEREDICTO_MEJORA_MODERADA,
+    VEREDICTO_MEJORA_SIGNIFICATIVA,
+    VEREDICTO_REGRESION,
+    VEREDICTO_ESTANCADO,
+    VEREDICTO_SIN_DATOS,
     comparar_sesiones_delta,
+    evaluar_diagnostico_inicial,
     guardar_decision_instructor,
     obtener_decision_instructor,
+    obtener_payload_para_llm,
+)
+from core.ai_advisor import (
+    ENV_API_KEY,
+    PROVIDER_ANTHROPIC,
+    PROVIDER_MOCK,
+    PROVIDER_OPENAI,
+    generar_devolucion_pedagogica,
 )
 
 # =============================================================================
-# CONFIGURACIÓN Y CONSTANTES
+# CONFIGURACIÓN Y CONSTANTES DE PRESENTACIÓN
 # =============================================================================
 DB_PATH = os.path.join(project_root, 'database', 'titan.db')
 MODELS_PATH = os.path.join(project_root, 'models', 'modelo_clasificador.joblib')
 EXPORTS_DIR = os.path.join(project_root, 'data', 'exports')
 os.makedirs(EXPORTS_DIR, exist_ok=True)
 
-# Las 6 señales canónicas (nombres EXACTOS de core.graph_mapper.CANONICAL_SIGNALS).
-GRAFICOS_DISPONIBLES = [
-    'Steering', 'Speed In Km/h', 'Brake Pad',
-    'Acceleration Pad', 'Fork Height In Mtrs', 'Tilt Angle In Deg'
-]
+# Las 6 señales canónicas: fuente única en core.graph_mapper.CANONICAL_SIGNALS.
+GRAFICOS_DISPONIBLES: List[str] = list(SENALES_CANONICAS)
 
 # Unidades físicas por señal para el eje Y.
 UNIDADES_SENAL = {
@@ -69,42 +89,48 @@ UNIDADES_SENAL = {
     'Tilt Angle In Deg': 'Grados',
 }
 
-RUTAS_DE_APRENDIZAJE = {
-    "Novato": {"titulo": "Ruta de Iniciación", "ejercicios": ["1.1. Controles", "2.1. Conducción básica"]},
-    "Sin nocion del espacio": {"titulo": "Ruta de Precisión Espacial", "ejercicios": ["2.2. Curvas en S", "5.7. Carga Vertical"]},
-    "Apurado": {"titulo": "Ruta de Control de Impulsos", "ejercicios": ["Módulo 4 (Apilamiento)", "7.1. Operación con Señales"]},
-    "Ineficiente": {"titulo": "Ruta de Productividad", "ejercicios": ["Módulo 6 (Estanterías)"]},
-    "Eficiente": {"titulo": "Ruta de Especialización", "ejercicios": ["Módulo 8 (Cargas Pesadas)"]}
-}
-
 # --- Paleta canónica ---
 COLOR_ACCENT = "#4A90E2"   # azul
 COLOR_SUCCESS = "#00A67E"  # verde
 COLOR_WARNING = "#F5A524"  # naranja
 COLOR_DANGER = "#EF4444"   # rojo
 
+# Las claves son las etiquetas que define el motor de evaluación (no se duplican).
 _COLORES_DICTAMEN = {
-    "Apto": COLOR_SUCCESS,
-    "Observado": COLOR_WARNING,
-    "No Apto Crítico": COLOR_DANGER,
+    DICTAMEN_APTO: COLOR_SUCCESS,
+    DICTAMEN_OBSERVADO: COLOR_WARNING,
+    DICTAMEN_NO_APTO_CRITICO: COLOR_DANGER,
 }
 _ICONOS_DICTAMEN = {
-    "Apto": "✅",
-    "Observado": "⚠️",
-    "No Apto Crítico": "⛔",
+    DICTAMEN_APTO: "✅",
+    DICTAMEN_OBSERVADO: "⚠️",
+    DICTAMEN_NO_APTO_CRITICO: "⛔",
 }
 _COLORES_EVOLUCION = {
-    "MEJORA SIGNIFICATIVA": COLOR_SUCCESS,
-    "MEJORA MODERADA": COLOR_SUCCESS,
-    "REGRESIÓN DETECTADA": COLOR_DANGER,
-    "RENDIMIENTO ESTANCADO": COLOR_WARNING,
-    "SIN DATOS": COLOR_DANGER,
+    VEREDICTO_MEJORA_SIGNIFICATIVA: COLOR_SUCCESS,
+    VEREDICTO_MEJORA_MODERADA: COLOR_SUCCESS,
+    VEREDICTO_REGRESION: COLOR_DANGER,
+    VEREDICTO_ESTANCADO: COLOR_WARNING,
+    VEREDICTO_SIN_DATOS: COLOR_DANGER,
 }
 
 # Criterio de color de los deltas en st.metric:
 #   * Colisiones / Frenadas / Volantazos / Suavidad -> REDUCCIÓN es MEJORA (inverse).
 #   * Puntaje depurado -> AUMENTO es MEJORA (normal).
 #   * Duración -> MENOS tiempo = mayor eficiencia (inverse).
+
+_COLORES_RIESGO = {
+    RIESGO_ALTO: COLOR_DANGER,
+    RIESGO_MEDIO: COLOR_WARNING,
+    RIESGO_BAJO: COLOR_SUCCESS,
+}
+
+# --- Asesor LLM (core.ai_advisor) ---
+PROVEEDORES_IA = {
+    "Local (sin costo de API)": PROVIDER_MOCK,
+    "OpenAI": PROVIDER_OPENAI,
+    "Anthropic": PROVIDER_ANTHROPIC,
+}
 
 
 # =============================================================================
@@ -135,21 +161,8 @@ def _procesar_reporte(pdf_path: str) -> Optional[int]:
 
 
 # =============================================================================
-# HELPERS DE DATOS / SANEADO
+# HELPERS DE PRESENTACIÓN
 # =============================================================================
-def _sanear_info_sesion(info: Optional[dict]) -> Dict[str, Any]:
-    """Sanea una fila de ``Sesiones`` para que la exportación PDF no falle."""
-    saneado: Dict[str, Any] = dict(info) if info else {}
-    for clave_num in ("puntaje_final", "duracion_segundos", "puntaje_depurado"):
-        if saneado.get(clave_num) is None:
-            saneado[clave_num] = 0
-    for clave_txt in ("perfil_operador", "nombre_operador", "nombre_clase",
-                      "nombre_ejercicio"):
-        if saneado.get(clave_txt) is None:
-            saneado[clave_txt] = "N/A"
-    return saneado
-
-
 def _delta_str(valor_abs: str, pct: Optional[float]) -> str:
     """Formatea el delta de un st.metric mostrando 'n/a' si el pct es None."""
     return f"{valor_abs} ({pct:+.1f}%)" if pct is not None else f"{valor_abs} (n/a)"
@@ -173,39 +186,43 @@ def _comparativa_cacheada(session_id_pre: int, session_id_post: int) -> Dict[str
 
 
 @st.cache_data(show_spinner=False)
-def _pdf_evolucion_cacheado(session_id_pre: int, session_id_post: int) -> Optional[bytes]:
-    """Bytes del PDF de evolución (si fpdf2 está disponible), con datos saneados."""
-    if not (PDF_EXPORT_AVAILABLE and crear_reporte_evolucion_pdf is not None):
+def _payload_llm_cacheado(
+    session_id_pre: int, session_id_post: Optional[int] = None
+) -> Dict[str, Any]:
+    """Payload de métricas para el asesor pedagógico (core.ai_advisor)."""
+    with get_db_connection(DB_PATH) as conn:
+        return obtener_payload_para_llm(session_id_pre, conn, session_id_post)
+
+
+def _pdf_diagnostico(
+    session_id: int, devolucion: Optional[Dict[str, Any]] = None
+) -> Optional[bytes]:
+    """Bytes del PDF de diagnóstico individual (los genera ``core.report_generator``)."""
+    if not PDF_EXPORT_AVAILABLE:
         return None
     with get_db_connection(DB_PATH) as conn:
-        row_pre = conn.execute(
-            "SELECT * FROM Sesiones WHERE id_sesion = ?", (session_id_pre,)
-        ).fetchone()
-        row_post = conn.execute(
-            "SELECT * FROM Sesiones WHERE id_sesion = ?", (session_id_post,)
-        ).fetchone()
-        pen_pre = conn.execute(
-            "SELECT COALESCE(SUM(penalizaciones), 0.0) FROM ResumenEventos WHERE id_sesion = ?",
-            (session_id_pre,),
-        ).fetchone()[0]
-        pen_post = conn.execute(
-            "SELECT COALESCE(SUM(penalizaciones), 0.0) FROM ResumenEventos WHERE id_sesion = ?",
-            (session_id_post,),
-        ).fetchone()[0]
-    di = _sanear_info_sesion(dict(row_pre) if row_pre else {})
-    df = _sanear_info_sesion(dict(row_post) if row_post else {})
-    di["penalizaciones_totales"] = float(pen_pre or 0.0)
-    df["penalizaciones_totales"] = float(pen_post or 0.0)
-    buf = io.BytesIO()
-    crear_reporte_evolucion_pdf(di, df, buf)
-    return buf.getvalue()
+        return generar_pdf_diagnostico(session_id, conn, devolucion=devolucion)
+
+
+def _pdf_evolucion(
+    session_id_pre: int,
+    session_id_post: int,
+    devolucion: Optional[Dict[str, Any]] = None,
+) -> Optional[bytes]:
+    """Bytes del PDF de evolución Pre/Post (los genera ``core.report_generator``)."""
+    if not PDF_EXPORT_AVAILABLE:
+        return None
+    with get_db_connection(DB_PATH) as conn:
+        return generar_pdf_evolucion(
+            session_id_pre, session_id_post, conn, devolucion=devolucion
+        )
 
 
 def _invalidar_caches() -> None:
     """Limpia las cachés de cálculo tras una ingesta nueva."""
     _diagnostico_cacheado.clear()
     _comparativa_cacheada.clear()
-    _pdf_evolucion_cacheado.clear()
+    _payload_llm_cacheado.clear()
 
 
 # =============================================================================
@@ -377,6 +394,64 @@ def _mostrar_decision_guardada(decision: Optional[Dict[str, Any]]) -> None:
     st.text(decision.get("notas") or "—")
 
 
+def _panel_devolucion_ia(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Renderiza la devolución pedagógica generada por ``core.ai_advisor``.
+
+    El proveedor y la API key se leen de la barra lateral (``st.session_state``);
+    sin clave configurada el asesor responde con su generador local determinista
+    (desarrollo y tests offline, sin costo de API).
+
+    Returns:
+        El dict de devolución, para reutilizarlo en la exportación a PDF.
+    """
+    proveedor = st.session_state.get("ia_provider", PROVIDER_MOCK)
+    api_key = st.session_state.get("ia_api_key") or None
+
+    with st.spinner("Generando devolución pedagógica..."):
+        devolucion = generar_devolucion_pedagogica(
+            payload, api_key=api_key, provider=proveedor
+        )
+
+    for aviso in devolucion.get("advertencias", []):
+        st.caption(f"ℹ️ {aviso}")
+
+    riesgo = devolucion.get("nivel_riesgo", "")
+    color = _COLORES_RIESGO.get(riesgo, COLOR_ACCENT)
+    origen = (
+        f"LLM · {devolucion.get('provider')} / {devolucion.get('modelo')}"
+        if devolucion.get("generado_por_llm")
+        else "Motor local determinista (sin costo de API)"
+    )
+    st.markdown(
+        f"""
+        <div style="border:1px solid {color}; border-left:14px solid {color};
+                    border-radius:12px; padding:16px 20px; margin:6px 0;
+                    background:rgba(255,255,255,0.03);">
+            <div style="font-size:0.85rem; letter-spacing:1.5px; color:#9AA4B2;
+                        text-transform:uppercase;">Diagnóstico de desempeño ·
+                        riesgo {html.escape(str(riesgo))}</div>
+            <div style="font-size:1.02rem; color:#D6DBE3; line-height:1.55;
+                        margin-top:8px;">{html.escape(str(devolucion.get('diagnostico', '')))}</div>
+            <div style="font-size:0.78rem; color:#7C8797; margin-top:8px;">{html.escape(origen)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    col_vicios, col_plan = st.columns(2)
+    with col_vicios:
+        st.markdown("**🔧 Vicios operativos detectados**")
+        for vicio in devolucion.get("vicios_operativos", []):
+            st.markdown(f"- {vicio}")
+    with col_plan:
+        st.markdown("**🛠️ Plan de acción correctivo**")
+        for accion in devolucion.get("plan_de_accion", []):
+            st.markdown(f"- {accion}")
+
+    st.info(f"🎯 Prioridad de la próxima sesión: {devolucion.get('foco_prioritario', '')}")
+    return devolucion
+
+
 # =============================================================================
 # INGESTA DE PDF CON DEDUPLICACIÓN POR IDENTIDAD DE CONTENIDO
 # =============================================================================
@@ -437,6 +512,8 @@ for _clave, _default in (
     ("diag_archivo_nombre", None),
     ("post_session_id", None),
     ("post_archivo_nombre", None),
+    ("ia_provider", PROVIDER_MOCK),
+    ("ia_api_key", ""),
 ):
     if _clave not in st.session_state:
         st.session_state[_clave] = _default
@@ -456,6 +533,29 @@ with st.sidebar:
         "2. **Día Final** — Compara una sesión previa con la prueba final para "
         "medir la evolución."
     )
+
+    st.markdown("---")
+    st.header("🤖 Asesor pedagógico")
+    etiqueta_proveedor = st.selectbox(
+        "Proveedor de la devolución",
+        options=list(PROVEEDORES_IA.keys()),
+        key="selectbox_proveedor_ia",
+        help=(
+            "'Local' usa el generador determinista de core.ai_advisor: funciona "
+            "offline y no tiene costo de API."
+        ),
+    )
+    st.session_state["ia_provider"] = PROVEEDORES_IA[etiqueta_proveedor]
+    if st.session_state["ia_provider"] != PROVIDER_MOCK:
+        st.session_state["ia_api_key"] = st.text_input(
+            "API key del proveedor",
+            type="password",
+            key="input_api_key_ia",
+            help=f"También se lee de la variable de entorno {ENV_API_KEY}.",
+        )
+        if not st.session_state.get("ia_api_key"):
+            st.caption("Sin API key se usará el generador local.")
+
     st.markdown("---")
     if st.session_state.get("diag_session_id"):
         st.success(f"📋 Sesión de diagnóstico activa: #{st.session_state['diag_session_id']}")
@@ -513,14 +613,24 @@ with tab1:
         # --- Foco pedagógico ---
         _tarjeta_foco(diagnostico["foco_instructor"])
 
+        # --- Devolución pedagógica del asesor (core.ai_advisor) ---
+        st.markdown("---")
+        st.subheader("🤖 3. Devolución pedagógica (IA)")
+        st.caption(
+            "Diagnóstico, vicios operativos y plan correctivo redactados a partir de "
+            "las métricas del motor de evaluación."
+        )
+        payload_diag = _payload_llm_cacheado(session_id_diag)
+        devolucion_diag = _panel_devolucion_ia(payload_diag)
+
         # --- Panel del instructor ---
         st.markdown("---")
-        st.subheader("🧑‍🏫 3. Panel del Instructor")
+        st.subheader("🧑‍🏫 4. Panel del Instructor")
         st.caption("Valida o corrige el dictamen de la IA y deja constancia de tu decisión.")
 
         _mostrar_decision_guardada(decision_previa)
 
-        opciones = ["Apto", "Observado", "No Apto"]
+        opciones = [DICTAMEN_APTO, DICTAMEN_OBSERVADO, "No Apto"]
         radio_key = f"radio_decision_{session_id_diag}"
         notas_key = f"notas_{session_id_diag}"
 
@@ -528,9 +638,11 @@ with tab1:
             semilla_radio = decision_previa["veredicto"]
         else:
             sugerencia_ia = diagnostico["sugerencia_admision"]
-            semilla_radio = "No Apto" if sugerencia_ia == "No Apto Crítico" else sugerencia_ia
+            semilla_radio = (
+                "No Apto" if sugerencia_ia == DICTAMEN_NO_APTO_CRITICO else sugerencia_ia
+            )
             if semilla_radio not in opciones:
-                semilla_radio = "Observado"
+                semilla_radio = DICTAMEN_OBSERVADO
         semilla_notas = (decision_previa.get("notas") or "") if decision_previa else ""
 
         st.session_state.setdefault(radio_key, semilla_radio)
@@ -571,7 +683,7 @@ with tab1:
 
         # --- Gráficos interactivos: cuadrícula 2x3 ---
         st.markdown("---")
-        st.subheader("📊 4. Telemetría de la sesión")
+        st.subheader("📊 5. Telemetría de la sesión")
         for fila in range(3):
             col1, col2 = st.columns(2)
             with col1:
@@ -579,20 +691,32 @@ with tab1:
             with col2:
                 _grafico_serie_plotly(series, GRAFICOS_DISPONIBLES[fila * 2 + 1], height=280)
 
+        # --- Exportación del documento (core.report_generator) ---
+        st.markdown("---")
+        pdf_diag_bytes = _pdf_diagnostico(session_id_diag, devolucion=devolucion_diag)
+        if pdf_diag_bytes:
+            st.download_button(
+                "⬇️ Descargar PDF de diagnóstico",
+                data=pdf_diag_bytes,
+                file_name=f"diagnostico_sesion_{session_id_diag}.pdf",
+                mime="application/pdf",
+            )
+        elif not PDF_EXPORT_AVAILABLE:
+            st.info(
+                "ℹ️ Exportación PDF no disponible: instala la dependencia con "
+                "'pip install fpdf2'."
+            )
+
 # =============================================================================
 # PESTAÑA 2 — COMPARATIVA DELTA (DÍA FINAL)
 # =============================================================================
 with tab2:
     st.subheader("📋 1. Sesión diagnóstica previa (Pre)")
-    sesiones_disp: List[Dict[str, Any]] = []
     try:
         with get_db_connection(DB_PATH) as conn:
-            filas = conn.execute(
-                "SELECT id_sesion, nombre_operador, nombre_ejercicio, fecha_hora_inicio "
-                "FROM Sesiones ORDER BY id_sesion"
-            ).fetchall()
-            sesiones_disp = [dict(f) for f in filas]
+            sesiones_disp = list_sessions(conn)
     except Exception as exc:
+        sesiones_disp = []
         st.error(f"⚠️ No se pudieron cargar las sesiones: {exc}")
 
     if not sesiones_disp:
@@ -679,8 +803,8 @@ with tab2:
                 delta_color="normal",
             )
             st.caption(
-                "Δ Puntaje depurado = puntaje_final + Σ penalizaciones. "
-                "Suavidad = frenadas bruscas + volantazos."
+                "Métricas, deltas y veredicto calculados por el motor de evaluación "
+                "(core.evaluador_diagnostico): esta capa solo los presenta."
             )
 
             # --- Gráficos de superposición con normalización temporal ---
@@ -713,17 +837,25 @@ with tab2:
                         normalizado=usar_normalizado, height=280,
                     )
 
-            # --- Descarga del PDF de evolución ---
+            # --- Devolución pedagógica de la evolución (core.ai_advisor) ---
             st.markdown("---")
-            pdf_evo_bytes = _pdf_evolucion_cacheado(session_id_pre, session_id_post)
-            if PDF_EXPORT_AVAILABLE and pdf_evo_bytes:
+            st.subheader("🤖 Devolución pedagógica (IA)")
+            payload_evo = _payload_llm_cacheado(session_id_pre, session_id_post)
+            devolucion_evo = _panel_devolucion_ia(payload_evo)
+
+            # --- Descarga del PDF de evolución (core.report_generator) ---
+            st.markdown("---")
+            pdf_evo_bytes = _pdf_evolucion(
+                session_id_pre, session_id_post, devolucion=devolucion_evo
+            )
+            if pdf_evo_bytes:
                 st.download_button(
                     "⬇️ Descargar PDF de evolución",
                     data=pdf_evo_bytes,
                     file_name=f"evolucion_{session_id_pre}_a_{session_id_post}.pdf",
                     mime="application/pdf",
                 )
-            else:
+            elif not PDF_EXPORT_AVAILABLE:
                 st.info(
                     "ℹ️ Exportación PDF no disponible: instala la dependencia con "
                     "'pip install fpdf2'."
