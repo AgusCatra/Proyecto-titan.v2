@@ -2,6 +2,7 @@
 # Extracción automática de gráficos de telemetría desde reportes PDF
 import logging
 import os
+import re
 from typing import Dict, List, Optional, Tuple
 
 import cv2
@@ -69,6 +70,18 @@ def _dedup_rects(rects: List[Tuple[int, int, int, int]]) -> List[Tuple[int, int,
     return out
 
 
+def _contained_in(r: Tuple[int, int, int, int], rects: List[Tuple[int, int, int, int]]) -> bool:
+    """True si ``r`` queda totalmente dentro de otra caja mayor de ``rects``."""
+    x, y, w, h = r
+    for o in rects:
+        if o == r:
+            continue
+        ox, oy, ow, oh = o
+        if x >= ox and y >= oy and x + w <= ox + ow and y + h <= oy + oh and w * h < ow * oh:
+            return True
+    return False
+
+
 # -------------------- DETECCIÓN DE CANDIDATOS --------------------
 def _find_chart_candidates(page_bgr: np.ndarray, page_idx: int, dbg_dir: str):
     h, w, _ = page_bgr.shape
@@ -77,27 +90,26 @@ def _find_chart_candidates(page_bgr: np.ndarray, page_idx: int, dbg_dir: str):
 
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-    mask[:int(h * 0.06), :] = 0
+    # NOTA: NO se recorta el tope de la página. El encabezado ("7/30/25 ... Report")
+    # es texto negro que no entra en la máscara HSV; recortarlo (antes 6%) eliminaba
+    # el borde superior y el título de la primera tarjeta de cada página.
 
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     rects: List[Tuple[int, int, int, int]] = []
     for c in cnts:
         x, y, w0, h0 = cv2.boundingRect(c)
-        area = w0 * h0
-        if area < 20_000:
+        if w0 * h0 < 20_000:
             continue
-        padx = int(max(40, w0 * 0.10))
-        pady = int(max(30, h0 * 0.15))
-        x0 = max(0, x - padx)
-        y0 = max(0, y - pady)
-        x1 = min(w, x + w0 + padx)
-        y1 = min(h, y + h0 + pady)
-        ww, hh = x1 - x0, y1 - y0
-        if ww < 500 or hh < 180 or hh > int(h * 0.7):
+        # Caja AJUSTADA al recuadro del gráfico (sin padding agresivo): el padding
+        # anterior solapaba las dos tarjetas de la página y fusionaba sus curvas.
+        if w0 < 500 or h0 < 180 or h0 > int(h * 0.7):
             continue
-        rects.append((x0, y0, ww, hh))
+        rects.append((x, y, w0, h0))
 
+    # Descartar sub-regiones contenidas dentro de una tarjeta mayor.
+    rects = [r for r in rects if not _contained_in(r, rects)]
     rects = _dedup_rects(rects)
+    rects.sort(key=lambda t: t[1])  # de arriba hacia abajo (subplot sup. e inf.)
     # Punto 6-G: solo escribir imágenes de depuración si está explícitamente habilitado.
     if DEBUG_EXPORT_IMAGES:
         _ensure_dir(dbg_dir)
@@ -122,38 +134,58 @@ def _binarize_for_ocr(img_bgr: np.ndarray) -> np.ndarray:
 def _ocr_title_near(page_bgr: np.ndarray, rect: Tuple[int, int, int, int]) -> str:
     x, y, w, h = rect
     H, W, _ = page_bgr.shape
-    y0 = max(0, y - int(h * 0.32))
-    y1 = max(0, y - int(h * 0.04))
-    strip = page_bgr[y0:y1, x:x + w]
+    # El título va DENTRO de la tarjeta, centrado en su franja superior (no encima
+    # del recuadro): leer por encima de la caja caía en la tarjeta vecina.
+    y0 = max(0, y + 4)
+    y1 = min(H, y + int(h * 0.14))
+    x0 = max(0, x + int(w * 0.10))
+    x1 = min(W, x + int(w * 0.90))
+    strip = page_bgr[y0:y1, x0:x1]
     if strip.size == 0:
         return ""
     prep = _binarize_for_ocr(strip)
-    txt = pytesseract.image_to_string(prep, config="--oem 3 --psm 6").lower()
+    txt = pytesseract.image_to_string(prep, config="--oem 3 --psm 7").lower()
     return " ".join(txt.split())
 
 
 def _guess_name_from_title(txt: str) -> Optional[str]:
+    """Mapea el título OCR (tolerante a puntuación) a una señal canónica.
+
+    Normaliza a minúsculas retirando caracteres especiales y aplica búsqueda por
+    palabra clave (``in``), de modo que variantes como "Steering (-14=Min 14=Max)",
+    "Brake Pad 0=Min 10-Max" o "Acceleration Pad (0=Min 10=Max)" coincidan.
+    """
     if not txt:
         return None
-    keys = [
-        (["steering"], "Steering"),
-        (["brake"], "Brake Pad"),
-        (["acceleration", "accel"], "Acceleration Pad"),
-        (["speed"], "Speed In Km/h"),
-        (["fork height"], "Fork Height In Mtrs"),
-        (["tilt"], "Tilt Angle In Deg"),
-    ]
-    for words, name in keys:
-        if any(w in txt for w in words):
-            return name
+    t = re.sub(r"[^a-z0-9/]+", " ", txt.lower())
+    t = " ".join(t.split())
+    if not t:
+        return None
+    if "steer" in t:
+        return "Steering"
+    if "brake" in t:
+        return "Brake Pad"
+    if "accel" in t:
+        return "Acceleration Pad"
+    if ("height" in t or "fork" in t) and "shift" not in t:
+        return "Fork Height In Mtrs"
+    if "tilt" in t:
+        return "Tilt Angle In Deg"
+    if "speed" in t or "km/h" in t:
+        return "Speed In Km/h"
     return None
 
 
 # -------------------- CURVAS --------------------
 def _clean_crop(crop: np.ndarray) -> np.ndarray:
     h, w, _ = crop.shape
-    cv2.rectangle(crop, (0, 0), (w, int(h * 0.12)), (0, 0, 0), -1)
+    # El 16% superior elimina título + swatch de leyenda (púrpura) que, de quedar,
+    # se colaría como "píxel más alto" y aplanaría un tramo de la curva.
+    cv2.rectangle(crop, (0, 0), (w, int(h * 0.16)), (0, 0, 0), -1)
     cv2.rectangle(crop, (0, int(h * 0.94)), (w, h), (0, 0, 0), -1)
+    # Bordes laterales del recuadro (azul, dentro del rango HSV): se limpian.
+    cv2.rectangle(crop, (0, 0), (3, h), (0, 0, 0), -1)
+    cv2.rectangle(crop, (w - 4, 0), (w, h), (0, 0, 0), -1)
     return crop
 
 
@@ -248,9 +280,19 @@ def extraer_telemetria_visual(
             if pts is None:
                 continue
 
-            # Si OCR falla, usamos heurística
+            # Si el OCR identifica el título, ese es el nombre canónico.
             name = name_by_title
             if not name:
+                if title_txt:
+                    # Título legible pero ajeno a las 6 señales canónicas
+                    # (p. ej. "Gear", "Pitch", "Roll", "Engine RPM"): se descarta
+                    # sin inventar un nombre por heurística de valores.
+                    logger.debug(
+                        "[Página %s | Cand %s] título no canónico, se descarta: %r",
+                        i + 1, j + 1, title_txt,
+                    )
+                    continue
+                # Sin texto OCR disponible: heurística legacy de respaldo.
                 series = _calibrate_series(pts, crop.shape, duracion_total_segundos, "tmp")
                 name = _fallback_assign(f"{i+1}_{j+1}", series)
 

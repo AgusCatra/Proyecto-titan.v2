@@ -104,19 +104,35 @@ def check_if_file_processed(connection: sqlite3.Connection, filename: str) -> bo
     return cursor.fetchone() is not None
 
 def insert_session(connection: sqlite3.Connection, parsed_data: dict, perfil_operador: str) -> Optional[int]:
-    sql = """INSERT INTO Sesiones(
-        nombre_archivo_origen, nombre_operador, nombre_clase, nombre_ejercicio,
-        fecha_hora_inicio, duracion_segundos, puntaje_final, perfil_operador
-    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)"""
+    base_cols = [
+        "nombre_archivo_origen", "nombre_operador", "nombre_clase", "nombre_ejercicio",
+        "fecha_hora_inicio", "duracion_segundos", "puntaje_final", "perfil_operador",
+    ]
     cursor = connection.cursor()
     try:
         info = parsed_data['session_data']
-        data_tuple = (
+        values = [
             info['nombre_archivo_origen'], info['nombre_operador'], info.get('nombre_clase', 'N/A'),
-            info['nombre_ejercicio'], info['fecha_hora_inicio'], info['duracion_segundos'], 
-            info['puntaje_final'], perfil_operador
-        )
-        cursor.execute(sql, data_tuple)
+            info['nombre_ejercicio'], info['fecha_hora_inicio'], info['duracion_segundos'],
+            info['puntaje_final'], perfil_operador,
+        ]
+        cols = list(base_cols)
+
+        # Columnas opcionales de reglas de negocio. Se incluyen SOLO si existen en
+        # el esquema de la BD destino, para seguir siendo compatible con bases
+        # antiguas (database/titan.db) que no las tienen.
+        optional = {
+            "puntaje_depurado": info.get("puntaje_depurado"),
+            "checklist_completado": 1 if info.get("checklist_completado") else 0,
+        }
+        existing = {row[1] for row in cursor.execute("PRAGMA table_info(Sesiones)").fetchall()}
+        for col, val in optional.items():
+            if col in existing and val is not None:
+                cols.append(col)
+                values.append(val)
+
+        sql = f"INSERT INTO Sesiones({', '.join(cols)}) VALUES({', '.join('?' * len(cols))})"
+        cursor.execute(sql, values)
         return cursor.lastrowid
     except (sqlite3.Error, KeyError) as e:
         print(f"Error al insertar la sesión: {e}")

@@ -12,7 +12,7 @@ DROP TABLE IF EXISTS Sesiones;
 -- Almacena los datos generales de cada sesión de entrenamiento.
 --
 CREATE TABLE Sesiones (
-    id_sesion INTEGER PRIMARY KEY AUTOINCREMENT,
+    id_sesion INTEGER PRIMARY KEY,
     nombre_archivo_origen TEXT NOT NULL UNIQUE,
     nombre_operador TEXT,
     nombre_clase TEXT,
@@ -20,6 +20,9 @@ CREATE TABLE Sesiones (
     fecha_hora_inicio TEXT,
     duracion_segundos INTEGER,
     puntaje_final REAL,
+    -- Reglas de negocio (opcionales; BD antiguas pueden no tenerlas):
+    puntaje_depurado REAL,          -- puntaje final sin el falso error de horquilla
+    checklist_completado INTEGER,   -- 1 si hubo PrechecksViolation (checklist inicial)
     perfil_operador TEXT,
     fecha_carga TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -29,7 +32,7 @@ CREATE TABLE Sesiones (
 -- Almacena los datos agregados de la tabla "Consolidated Results".
 --
 CREATE TABLE ResumenEventos (
-    id_resumen INTEGER PRIMARY KEY AUTOINCREMENT,
+    id_resumen INTEGER PRIMARY KEY,
     id_sesion INTEGER NOT NULL,
     tipo_evento TEXT,
     conteo_eventos INTEGER,
@@ -43,7 +46,7 @@ CREATE TABLE ResumenEventos (
 -- Almacena las series de tiempo extraídas de los gráficos.
 --
 CREATE TABLE Telemetria (
-    id_telemetria INTEGER PRIMARY KEY AUTOINCREMENT,
+    id_telemetria INTEGER PRIMARY KEY,
     id_sesion_fk INTEGER NOT NULL,
     nombre_grafico TEXT NOT NULL, -- ej: "Brake Pad", "Steering"
     timestamps TEXT NOT NULL,     -- ej: "0.0,0.48,0.96,..."
@@ -56,3 +59,21 @@ CREATE TABLE Telemetria (
 CREATE INDEX idx_sesiones_operador ON Sesiones(nombre_operador);
 CREATE INDEX idx_sesiones_perfil ON Sesiones(perfil_operador);
 CREATE INDEX idx_telemetria_sesion ON Telemetria(id_sesion_fk);
+
+--
+-- Tabla: DecisionInstructor (NUEVA - evaluación pedagógica)
+-- Almacena la decisión/fallo del instructor sobre el diagnóstico de admisión de
+-- una sesión. Se crea con IF NOT EXISTS (sin DROP) para no perder datos en BD
+-- existentes; el módulo core/evaluador_diagnostico.py la asegura en runtime.
+--
+CREATE TABLE IF NOT EXISTS DecisionInstructor (
+    id_decision INTEGER PRIMARY KEY AUTOINCREMENT,
+    id_sesion INTEGER NOT NULL UNIQUE,
+    veredicto TEXT NOT NULL,
+    foco_sugerido TEXT,
+    notas TEXT,
+    fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(id_sesion) REFERENCES Sesiones(id_sesion) ON DELETE CASCADE
+);
+
+-- UNIQUE(id_sesion) ya crea un índice implícito; no se añade índice redundante.
