@@ -41,8 +41,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-# --- Reutilización de helpers existentes (NO reimplementamos el parseo CSV) ---
-from core.db_manager import get_telemetry_for_graph
+# --- Reutilización de helpers existentes ---
+# ``map_graphs`` normaliza ``nombre_grafico`` a las 6 señales canónicas (y resuelve
+# nombres legacy ``Graph_X_Y`` vía mapeo.json), igual que el pipeline de ingesta.
+from core.graph_mapper import map_graphs
 
 # =============================================================================
 # CONSTANTES DE UMBRAL (ajustables en un único lugar)
@@ -125,33 +127,88 @@ COLISIONES_OBSERVADO: int = 1
 # =============================================================================
 # UTILIDADES INTERNAS DE SERIES Y DERIVADAS
 # =============================================================================
-def _cargar_serie(
-    id_sesion: int,
-    nombre_grafico: str,
-    conn: sqlite3.Connection,
+def _deserializar_csv(
+    timestamps_raw: Any, valores_raw: Any
 ) -> List[Tuple[float, float]]:
-    """Carga una serie (t, v) de telemetría y la devuelve ORDENADA por tiempo.
+    """Deserializa los CSV paralelos ``timestamps``/``valores`` a pares (t, v) float.
 
-    Reutiliza :func:`core.db_manager.get_telemetry_for_graph`. Devuelve lista vacía
-    si la señal no existe o viene vacía (nunca lanza excepción).
+    La BD guarda cada señal como UNA fila con dos columnas de texto CSV a 2 decimales
+    (ej. ``"0.00,0.50,1.00"``). Se recorta al tamaño mínimo común para evitar
+    desalineaciones y se devuelve lista vacía ante cualquier valor no numérico (nunca
+    lanza). Un vector constante en ``0.0`` es DATO LEGÍTIMO y se conserva tal cual:
+    NO se descarta por varianza nula (regla de negocio de flatlines).
     """
-    try:
-        puntos = get_telemetry_for_graph(id_sesion, nombre_grafico, conn=conn)
-    except Exception:  # pragma: no cover - defensa ante errores de BD imprevistos
-        return []
-    if not puntos:
+    if timestamps_raw is None or valores_raw is None:
         return []
     try:
-        return sorted((float(t), float(v)) for t, v in puntos)
+        ts = [float(x) for x in str(timestamps_raw).split(",") if x.strip() != ""]
+        vals = [float(x) for x in str(valores_raw).split(",") if x.strip() != ""]
     except (TypeError, ValueError):
         return []
+    n = min(len(ts), len(vals))
+    return [(ts[i], vals[i]) for i in range(n)]
+
+
+def _extraer_fila_telemetria(row: Any) -> Tuple[Any, Any, Any]:
+    """Lee ``(nombre_grafico, timestamps, valores)`` con o sin ``row_factory=Row``."""
+    try:
+        return row["nombre_grafico"], row["timestamps"], row["valores"]
+    except (TypeError, IndexError, KeyError):
+        return row[0], row[1], row[2]
 
 
 def _cargar_series(
     id_sesion: int, conn: sqlite3.Connection
 ) -> Dict[str, List[Tuple[float, float]]]:
-    """Carga las 6 señales canónicas ordenadas. Las ausentes quedan como lista vacía."""
-    return {senal: _cargar_serie(id_sesion, senal, conn) for senal in SENALES_CANONICAS}
+    """Carga las 6 señales canónicas de la sesión, ORDENADAS por tiempo.
+
+    Realiza UNA única consulta sobre ``Telemetria`` usando la FK real ``id_sesion_fk``
+    (``SELECT nombre_grafico, timestamps, valores FROM Telemetria WHERE
+    id_sesion_fk = ?``), deserializa los CSV paralelos a pares ``(t, v)`` y normaliza
+    ``nombre_grafico`` a las señales canónicas vía :func:`core.graph_mapper.map_graphs`
+    (también resuelve nombres legacy ``Graph_X_Y``).
+
+    Una señal se considera DISPONIBLE si existen filas para ella, con independencia de
+    sus valores: un flatline en ``0.0`` cuenta como señal presente y válida. Las
+    señales ausentes quedan como lista vacía. Las series se ordenan por ``timestamp``
+    antes de devolverlas porque algunos tiempos pueden ser negativos o no monótonos
+    (artefactos de calibración) y las derivadas exigen orden temporal. Nunca lanza.
+    """
+    vacio: Dict[str, List[Tuple[float, float]]] = {s: [] for s in SENALES_CANONICAS}
+    try:
+        cur = conn.execute(
+            "SELECT nombre_grafico, timestamps, valores "
+            "FROM Telemetria WHERE id_sesion_fk = ?",
+            (id_sesion,),
+        )
+        rows = cur.fetchall()
+    except sqlite3.Error:
+        return vacio
+
+    raw: Dict[str, List[Tuple[float, float]]] = {}
+    for row in rows or []:
+        nombre, ts_raw, val_raw = _extraer_fila_telemetria(row)
+        if not nombre:
+            continue
+        serie = _deserializar_csv(ts_raw, val_raw)
+        if not serie:
+            continue
+        # Si la misma señal aparece en varias filas, conservar la serie más larga.
+        clave = str(nombre)
+        if clave not in raw or len(serie) > len(raw[clave]):
+            raw[clave] = serie
+
+    # Normalización a canónicos (idempotente para nombres ya canónicos).
+    try:
+        mapeado = map_graphs(raw)
+    except Exception:  # pragma: no cover - defensa ante mapeo legacy corrupto
+        mapeado = {k: v for k, v in raw.items() if k in SENALES_CANONICAS}
+
+    # Garantizar las 6 claves y ORDENAR por tiempo antes de cualquier derivada.
+    return {
+        senal: sorted(mapeado.get(senal, []), key=lambda tv: tv[0])
+        for senal in SENALES_CANONICAS
+    }
 
 
 def _serie_a_arrays(
