@@ -92,6 +92,11 @@ class PDF(FPDF):
         _celda(self, f'Página {self.page_no()}', alto=10, alineacion='C', salto=False)
 
 
+def _ancho_util(pdf: PDF) -> float:
+    """Ancho horizontal útil de la página (entre márgenes) en mm."""
+    return pdf.w - pdf.l_margin - pdf.r_margin
+
+
 def _celda(
     pdf: PDF,
     texto: Any,
@@ -106,11 +111,21 @@ def _celda(
 
     ``salto=True`` devuelve el cursor al margen izquierdo en la línea siguiente;
     ``salto=False`` lo deja a la derecha de la celda (para tablas).
+
+    M4: cuando es una celda de ancho completo (``ancho == 0`` y ``salto``) cuyo
+    texto saneado NO cabe en el ancho útil de la página, ``pdf.cell`` lo dibuja
+    desbordándose silenciosamente fuera del papel. En ese caso se delega en el
+    ``multi_cell`` envolvente de :func:`_parrafo`. Las celdas de tabla (``ancho``
+    explícito o ``salto=False``) NO se tocan para no alterar su layout.
     """
+    saneado = _txt(texto)
+    if ancho == 0 and salto and pdf.get_string_width(saneado) > _ancho_util(pdf):
+        _parrafo(pdf, saneado)
+        return
     pdf.cell(
         ancho,
         alto,
-        _txt(texto),
+        saneado,
         borde,
         new_x=XPos.LMARGIN if salto else XPos.RIGHT,
         new_y=YPos.NEXT if salto else YPos.TOP,
@@ -169,27 +184,51 @@ def _seccion_telemetria(pdf: PDF, comportamiento: Dict[str, Any]) -> None:
 
 
 def _seccion_devolucion(pdf: PDF, devolucion: Optional[Dict[str, Any]]) -> None:
-    """Dibuja la devolución pedagógica generada por ``core.ai_advisor``."""
+    """Dibuja el dictamen pedagógico generado por ``core.ai_advisor``.
+
+    Consume el contrato de 11 claves: las narrativas (``resumen_ejecutivo``,
+    ``puntos_fuertes``, ``vicios_criticos``, ``plan_accion_recomendado``) y las
+    autoritativas del motor (``nivel_riesgo``, ``foco_prioritario``). Todo el texto
+    pasa por el escudo Latin-1 ``_txt`` (vía ``_celda``/``_parrafo``).
+    """
     if not devolucion:
         return
 
     pdf.ln(4)
     pdf.set_font(FUENTE_PDF, 'B', 12)
-    _celda(pdf, 'Devolución Pedagógica', alto=10)
+    _celda(pdf, 'DICTAMEN PEDAGÓGICO DEL INSTRUCTOR (IA)', alto=10)
 
     origen = _txt(devolucion.get('provider'), 'desconocido')
     modelo = _txt(devolucion.get('modelo'), '')
     pdf.set_font(FUENTE_PDF, 'I', 9)
-    _celda(pdf, f"Generada por: {origen}" + (f" / {modelo}" if modelo else ""), alto=5)
+    # M4: línea de origen potencialmente larga -> ``multi_cell`` envolvente.
+    _parrafo(pdf, f"Generada por: {origen}" + (f" / {modelo}" if modelo else ""))
 
-    pdf.set_font(FUENTE_PDF, '', 11)
-    diagnostico = devolucion.get('diagnostico')
-    if diagnostico:
-        _parrafo(pdf, diagnostico)
+    # Clasificación autoritativa del motor (riesgo + foco prioritario).
+    nivel_riesgo = _txt(devolucion.get('nivel_riesgo'), '')
+    foco = _txt(devolucion.get('foco_prioritario'), '')
+    if nivel_riesgo or foco:
+        pdf.set_font(FUENTE_PDF, 'B', 10)
+        if nivel_riesgo:
+            _celda(pdf, f"Nivel de riesgo: {nivel_riesgo}", alto=6)
+        if foco:
+            # M4: ``foco_prioritario`` es texto libre del motor/LLM y puede medir
+            # ~217 mm (más que los ~190 mm útiles): con ``_celda``/``pdf.cell`` se
+            # desbordaba fuera de la página. Se dibuja con ``_parrafo`` (multi_cell).
+            _parrafo(pdf, f"Foco prioritario: {foco}")
 
+    # Resumen ejecutivo (párrafo corrido).
+    resumen = devolucion.get('resumen_ejecutivo')
+    if resumen:
+        pdf.ln(2)
+        pdf.set_font(FUENTE_PDF, '', 11)
+        _parrafo(pdf, resumen)
+
+    # Listas con viñetas: fortalezas, vicios críticos y plan de acción.
     for titulo, clave in (
-        ('Vicios operativos detectados', 'vicios_operativos'),
-        ('Plan de acción correctivo', 'plan_de_accion'),
+        ('Puntos fuertes', 'puntos_fuertes'),
+        ('Vicios críticos detectados', 'vicios_criticos'),
+        ('Plan de acción recomendado', 'plan_accion_recomendado'),
     ):
         elementos = devolucion.get(clave) or []
         if not elementos:

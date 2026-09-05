@@ -54,8 +54,10 @@ def test_crear_reporte_evolucion_pdf_con_devolucion_no_rompe_por_unicode(conn_se
     from core.evaluador_diagnostico import obtener_datos_evolucion
 
     devolucion = _devolucion_de_prueba(conn_semillada)
-    devolucion["diagnostico"] = "⚠️ Diagnóstico con emoji — y comillas “curvas” ✅"
-    devolucion["plan_de_accion"] = ["🎯 Acción 1 → criterio", "Acción 2 …"]
+    devolucion["resumen_ejecutivo"] = "⚠️ Resumen con emoji — y comillas “curvas” ✅"
+    devolucion["puntos_fuertes"] = ["🎯 Fortaleza 1 → criterio", "Fortaleza 2 …"]
+    devolucion["vicios_criticos"] = ["▼ Vicio crítico 1"]
+    devolucion["plan_accion_recomendado"] = ["🎯 Módulo 1 → criterio", "Módulo 2 …"]
 
     datos = obtener_datos_evolucion(1, 2, conn_semillada)
     buffer = io.BytesIO()
@@ -69,6 +71,52 @@ def test_crear_reporte_evolucion_pdf_tolerante_a_datos_vacios(tmp_path):
     ruta = tmp_path / "evolucion_vacia.pdf"
     rg.crear_reporte_evolucion_pdf({}, {}, str(ruta))
     assert ruta.exists() and ruta.stat().st_size > 0
+
+
+# =============================================================================
+# M4 — TEXTO LARGO QUE DESBORDA EL ANCHO ÚTIL DE LA PÁGINA (~190 mm)
+# =============================================================================
+def test_foco_prioritario_largo_no_desborda_y_genera_pdf_valido(conn_semillada):
+    """M4: ``foco_prioritario`` kilométrico se envuelve (multi_cell) sin reventar."""
+    from core.evaluador_diagnostico import obtener_datos_evolucion
+
+    devolucion = _devolucion_de_prueba(conn_semillada)
+    devolucion["foco_prioritario"] = (
+        "Consolidar la anticipación en cruces ciegos, reducir la velocidad de "
+        "traslado con horquilla elevada y eliminar los microajustes de torre en "
+        "apilados de precisión " * 6
+    )
+    devolucion["provider"] = "openrouter"
+    devolucion["modelo"] = "proveedor/modelo-de-nombre-desmesuradamente-largo " * 8
+
+    datos = obtener_datos_evolucion(1, 2, conn_semillada)
+    buffer = io.BytesIO()
+    rg.crear_reporte_evolucion_pdf(
+        datos["datos_iniciales"], datos["datos_finales"], buffer, devolucion=devolucion
+    )
+    contenido = buffer.getvalue()
+    assert contenido.startswith(b"%PDF")
+    assert len(contenido) > 800
+
+
+def test_celda_de_ancho_completo_envuelve_cuando_no_cabe_en_la_pagina():
+    """M4: ``_celda`` delega en ``_parrafo`` solo si el texto excede el ancho útil."""
+    pdf = rg.PDF()
+    pdf.add_page()
+    pdf.set_font(rg.FUENTE_PDF, "", 11)
+
+    texto_largo = "Texto que se desbordaría del papel " * 20
+    assert pdf.get_string_width(rg._txt(texto_largo)) > rg._ancho_util(pdf)
+    rg._celda(pdf, texto_largo)          # no lanza ni desborda: envuelve
+
+    # Las celdas de tabla (ancho explícito) conservan su geometría: el cursor
+    # queda a la derecha de la celda, no en el margen izquierdo.
+    rg._celda(pdf, "Celda", alto=8, ancho=40, borde=1, salto=False)
+    assert pdf.get_x() > pdf.l_margin
+
+    buffer = io.BytesIO()
+    pdf.output(buffer)
+    assert buffer.getvalue().startswith(b"%PDF")
 
 
 def test_generar_pdf_evolucion_devuelve_bytes_desde_ids_de_bd(conn_semillada):

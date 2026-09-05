@@ -62,9 +62,16 @@ from core.evaluador_diagnostico import (
 )
 from core.ai_advisor import (
     ENV_API_KEY,
+    ENV_API_KEY_LEGADO,
+    ENV_BASE_URL,
+    ENV_MODEL,
+    ENV_MODEL_LEGADO,
     PROVIDER_ANTHROPIC,
+    PROVIDER_GEMINI,
     PROVIDER_MOCK,
     PROVIDER_OPENAI,
+    PROVIDER_OPENROUTER,
+    PROVEEDORES_SOPORTADOS,
     generar_devolucion_pedagogica,
 )
 
@@ -126,10 +133,19 @@ _COLORES_RIESGO = {
 }
 
 # --- Asesor LLM (core.ai_advisor) ---
+# m6: la lista de proveedores se DERIVA de core.ai_advisor.PROVEEDORES_SOPORTADOS
+# (fuente única de verdad). Aquí solo se aporta la etiqueta legible; si el núcleo
+# añade/quita un proveedor, la UI lo refleja sin poder divergir.
+_ETIQUETAS_PROVEEDOR = {
+    PROVIDER_MOCK: "Local (sin costo de API)",
+    PROVIDER_OPENAI: "OpenAI",
+    PROVIDER_ANTHROPIC: "Anthropic",
+    PROVIDER_OPENROUTER: "OpenRouter",
+    PROVIDER_GEMINI: "Google Gemini",
+}
 PROVEEDORES_IA = {
-    "Local (sin costo de API)": PROVIDER_MOCK,
-    "OpenAI": PROVIDER_OPENAI,
-    "Anthropic": PROVIDER_ANTHROPIC,
+    _ETIQUETAS_PROVEEDOR.get(proveedor, str(proveedor).title()): proveedor
+    for proveedor in PROVEEDORES_SOPORTADOS
 }
 
 
@@ -219,10 +235,22 @@ def _pdf_evolucion(
 
 
 def _invalidar_caches() -> None:
-    """Limpia las cachés de cálculo tras una ingesta nueva."""
+    """Limpia las cachés de cálculo tras una ingesta nueva.
+
+    m4a: además de las cachés de datos, se resetean las devoluciones pedagógicas
+    cacheadas (pestaña Delta y pestaña 1) para que una sesión nueva no herede un
+    dictamen LLM obsoleto.
+    """
     _diagnostico_cacheado.clear()
     _comparativa_cacheada.clear()
     _payload_llm_cacheado.clear()
+    for clave in (
+        "devolucion_delta",
+        "devolucion_delta_ids",
+        "devolucion_tab1",
+        "devolucion_tab1_ids",
+    ):
+        st.session_state[clave] = None
 
 
 # =============================================================================
@@ -394,62 +422,155 @@ def _mostrar_decision_guardada(decision: Optional[Dict[str, Any]]) -> None:
     st.text(decision.get("notas") or "—")
 
 
-def _panel_devolucion_ia(payload: Dict[str, Any]) -> Dict[str, Any]:
+def _texto_markdown_seguro(valor: Any) -> str:
+    """m3: neutraliza la sintaxis Markdown/HTML en texto NO confiable del LLM.
+
+    ``st.markdown``/``st.info`` interpretan enlaces, énfasis, código inline y HTML,
+    de modo que una devolución del modelo podría inyectar formato o enlaces. Se
+    escapan los caracteres de control para mostrar el texto literal preservando la
+    legibilidad (la viñeta se añade aparte, fuera del texto saneado).
+    """
+    texto = str(valor if valor is not None else "")
+    for original, seguro in (
+        ("`", "\\`"),
+        ("[", "\\["),
+        ("]", "\\]"),
+        ("<", "&lt;"),
+        (">", "&gt;"),
+        ("*", "\\*"),
+        ("_", "\\_"),
+    ):
+        texto = texto.replace(original, seguro)
+    return texto
+
+
+def _identidad_devolucion_tab1(
+    session_id: Any, proveedor: str, api_key: Optional[str]
+) -> tuple:
+    """M5: identidad estable de la devolución de la pestaña 1.
+
+    Cambia SOLO si cambia la sesión, el proveedor o la presencia (no el valor) de
+    la API key; de este modo un rerun de Streamlit NO relanza una llamada LLM
+    potencialmente de pago y de hasta 60 s.
+    """
+    return (session_id, proveedor, bool(api_key))
+
+
+def _panel_devolucion_ia(session_id: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
     """Renderiza la devolución pedagógica generada por ``core.ai_advisor``.
 
     El proveedor y la API key se leen de la barra lateral (``st.session_state``);
     sin clave configurada el asesor responde con su generador local determinista
     (desarrollo y tests offline, sin costo de API).
 
+    M5: el resultado se cachea en ``st.session_state`` bajo la identidad
+    ``(session_id, proveedor, bool(api_key))`` y se regenera SOLO cuando esa
+    identidad cambia; en caso contrario se re-renderiza desde la caché, eliminando
+    la regeneración redundante (y de pago) en cada rerun de Streamlit.
+
     Returns:
         El dict de devolución, para reutilizarlo en la exportación a PDF.
     """
     proveedor = st.session_state.get("ia_provider", PROVIDER_MOCK)
     api_key = st.session_state.get("ia_api_key") or None
+    identidad = _identidad_devolucion_tab1(session_id, proveedor, api_key)
 
-    with st.spinner("Generando devolución pedagógica..."):
-        devolucion = generar_devolucion_pedagogica(
-            payload, api_key=api_key, provider=proveedor
+    cacheada = st.session_state.get("devolucion_tab1")
+    if cacheada is not None and st.session_state.get("devolucion_tab1_ids") == identidad:
+        devolucion = cacheada
+    else:
+        with st.spinner("Generando devolución pedagógica..."):
+            devolucion = generar_devolucion_pedagogica(
+                payload, api_key=api_key, provider=proveedor
+            )
+        st.session_state["devolucion_tab1"] = devolucion
+        st.session_state["devolucion_tab1_ids"] = identidad
+
+    _renderizar_devolucion(devolucion)
+    return devolucion
+
+
+def _renderizar_devolucion(devolucion: Dict[str, Any]) -> None:
+    """Renderiza el contenido de una devolución ya generada (contrato de 11 claves).
+
+    m2: todo el bloque se envuelve en un ``st.container(border=True)`` con
+    callouts consistentes —``st.success`` (puntos fuertes), ``st.error`` (vicios
+    críticos) y ``st.warning`` (plan de acción)—. m3: las narrativas y el foco, que
+    provienen del modelo, se sanean con :func:`_texto_markdown_seguro` antes de
+    ``st.markdown``. M2-visibility: si el resultado NO lo generó el LLM pero el
+    proveedor elegido NO era ``mock``, se avisa con ``st.error`` prominente de que
+    la llamada real se degradó al generador local.
+    """
+    proveedor_elegido = st.session_state.get("ia_provider", PROVIDER_MOCK)
+
+    with st.container(border=True):
+        # --- M2-visibility: degradación silenciosa de un proveedor real a local ---
+        if not devolucion.get("generado_por_llm") and proveedor_elegido != PROVIDER_MOCK:
+            st.error(
+                f"⚠️ El proveedor '{proveedor_elegido}' NO completó la llamada al LLM: "
+                "la devolución se degradó al generador local determinista. Revisa la "
+                "API key, la cuota o la conectividad de red."
+            )
+
+        # --- Advertencias ---
+        for aviso in devolucion.get("advertencias", []):
+            st.caption(f"ℹ️ {aviso}")
+
+        # --- Origen y nivel de riesgo ---
+        riesgo = devolucion.get("nivel_riesgo", "")
+        color = _COLORES_RIESGO.get(riesgo, COLOR_ACCENT)
+        origen = (
+            f"LLM · {devolucion.get('provider')} / {devolucion.get('modelo')}"
+            if devolucion.get("generado_por_llm")
+            else "Motor local determinista (sin costo de API)"
         )
 
-    for aviso in devolucion.get("advertencias", []):
-        st.caption(f"ℹ️ {aviso}")
+        # --- Tarjeta principal: resumen ejecutivo ---
+        st.markdown(
+            f"""
+            <div style="border:1px solid {color}; border-left:14px solid {color};
+                        border-radius:12px; padding:16px 20px; margin:6px 0;
+                        background:rgba(255,255,255,0.03);">
+                <div style="font-size:0.85rem; letter-spacing:1.5px; color:#9AA4B2;
+                            text-transform:uppercase;">Resumen ejecutivo ·
+                            riesgo {html.escape(str(riesgo))}</div>
+                <div style="font-size:1.02rem; color:#D6DBE3; line-height:1.55;
+                            margin-top:8px;">{html.escape(str(devolucion.get('resumen_ejecutivo', '')))}</div>
+                <div style="font-size:0.78rem; color:#7C8797; margin-top:8px;">{html.escape(origen)}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    riesgo = devolucion.get("nivel_riesgo", "")
-    color = _COLORES_RIESGO.get(riesgo, COLOR_ACCENT)
-    origen = (
-        f"LLM · {devolucion.get('provider')} / {devolucion.get('modelo')}"
-        if devolucion.get("generado_por_llm")
-        else "Motor local determinista (sin costo de API)"
-    )
-    st.markdown(
-        f"""
-        <div style="border:1px solid {color}; border-left:14px solid {color};
-                    border-radius:12px; padding:16px 20px; margin:6px 0;
-                    background:rgba(255,255,255,0.03);">
-            <div style="font-size:0.85rem; letter-spacing:1.5px; color:#9AA4B2;
-                        text-transform:uppercase;">Diagnóstico de desempeño ·
-                        riesgo {html.escape(str(riesgo))}</div>
-            <div style="font-size:1.02rem; color:#D6DBE3; line-height:1.55;
-                        margin-top:8px;">{html.escape(str(devolucion.get('diagnostico', '')))}</div>
-            <div style="font-size:0.78rem; color:#7C8797; margin-top:8px;">{html.escape(origen)}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        # --- Puntos fuertes (puede ser legítimamente vacío en sesiones severas) ---
+        puntos_fuertes = devolucion.get("puntos_fuertes", [])
+        if puntos_fuertes:
+            st.success("**💪 Puntos fuertes**")
+            for punto in puntos_fuertes:
+                st.markdown(f"- {_texto_markdown_seguro(punto)}")
 
-    col_vicios, col_plan = st.columns(2)
-    with col_vicios:
-        st.markdown("**🔧 Vicios operativos detectados**")
-        for vicio in devolucion.get("vicios_operativos", []):
-            st.markdown(f"- {vicio}")
-    with col_plan:
-        st.markdown("**🛠️ Plan de acción correctivo**")
-        for accion in devolucion.get("plan_de_accion", []):
-            st.markdown(f"- {accion}")
+        # --- Vicios críticos ---
+        col_vicios, col_plan = st.columns(2)
+        with col_vicios:
+            vicios = devolucion.get("vicios_criticos", [])
+            if vicios:
+                st.error("**🔧 Vicios críticos detectados**")
+                for vicio in vicios:
+                    st.markdown(f"- {_texto_markdown_seguro(vicio)}")
+            else:
+                st.info("Sin vicios críticos identificados.")
+        with col_plan:
+            plan = devolucion.get("plan_accion_recomendado", [])
+            if plan:
+                st.warning("**🛠️ Plan de acción recomendado**")
+                for accion in plan:
+                    st.markdown(f"- {_texto_markdown_seguro(accion)}")
+            else:
+                st.caption("Sin plan de acción generado.")
 
-    st.info(f"🎯 Prioridad de la próxima sesión: {devolucion.get('foco_prioritario', '')}")
-    return devolucion
+        # --- Foco prioritario ---
+        foco = _texto_markdown_seguro(devolucion.get("foco_prioritario", ""))
+        st.info(f"🎯 Prioridad de la próxima sesión: {foco}")
 
 
 # =============================================================================
@@ -514,6 +635,10 @@ for _clave, _default in (
     ("post_archivo_nombre", None),
     ("ia_provider", PROVIDER_MOCK),
     ("ia_api_key", ""),
+    ("devolucion_delta", None),
+    ("devolucion_delta_ids", None),
+    ("devolucion_tab1", None),
+    ("devolucion_tab1_ids", None),
 ):
     if _clave not in st.session_state:
         st.session_state[_clave] = _default
@@ -554,7 +679,17 @@ with st.sidebar:
             help=f"También se lee de la variable de entorno {ENV_API_KEY}.",
         )
         if not st.session_state.get("ia_api_key"):
-            st.caption("Sin API key se usará el generador local.")
+            st.caption(
+                "Campo vacío: si el entorno define una API key "
+                f"(`{ENV_API_KEY}` o la heredada `{ENV_API_KEY_LEGADO}`), el núcleo "
+                "la usará y SÍ habilitará la llamada de red. Solo si no existe "
+                "ninguna clave (ni aquí ni en el entorno) se usará el generador local."
+            )
+        st.caption(
+            f"Variables de entorno: `{ENV_API_KEY}`, `{ENV_MODEL}`, `{ENV_BASE_URL}`. "
+            f"Se siguen aceptando los nombres heredados `{ENV_API_KEY_LEGADO}` y "
+            f"`{ENV_MODEL_LEGADO}` (deprecados)."
+        )
 
     st.markdown("---")
     if st.session_state.get("diag_session_id"):
@@ -617,11 +752,11 @@ with tab1:
         st.markdown("---")
         st.subheader("🤖 3. Devolución pedagógica (IA)")
         st.caption(
-            "Diagnóstico, vicios operativos y plan correctivo redactados a partir de "
-            "las métricas del motor de evaluación."
+            "Resumen ejecutivo, puntos fuertes, vicios críticos y plan de acción "
+            "redactados a partir de las métricas del motor de evaluación."
         )
         payload_diag = _payload_llm_cacheado(session_id_diag)
-        devolucion_diag = _panel_devolucion_ia(payload_diag)
+        devolucion_diag = _panel_devolucion_ia(session_id_diag, payload_diag)
 
         # --- Panel del instructor ---
         st.markdown("---")
@@ -840,8 +975,45 @@ with tab2:
             # --- Devolución pedagógica de la evolución (core.ai_advisor) ---
             st.markdown("---")
             st.subheader("🤖 Devolución pedagógica (IA)")
-            payload_evo = _payload_llm_cacheado(session_id_pre, session_id_post)
-            devolucion_evo = _panel_devolucion_ia(payload_evo)
+
+            proveedor = st.session_state.get("ia_provider", PROVIDER_MOCK)
+            api_key = st.session_state.get("ia_api_key") or None
+
+            # m4b: la identidad de la caché incluye las sesiones Y el proveedor Y la
+            # presencia (no el valor) de la API key; cambiar cualquiera de ellos
+            # invalida la devolución cacheada y obliga a regenerarla.
+            identidad_delta = (
+                session_id_pre, session_id_post, proveedor, bool(api_key)
+            )
+            if st.session_state.get("devolucion_delta_ids") != identidad_delta:
+                st.session_state["devolucion_delta"] = None
+                st.session_state["devolucion_delta_ids"] = None
+
+            # Botón de generación explícita (etiqueta EXACTA congelada por la spec).
+            if st.button("🤖 Generar Devolución Pedagógica con IA", type="primary"):
+                payload_evo = _payload_llm_cacheado(session_id_pre, session_id_post)
+                with st.spinner("Generando devolución pedagógica..."):
+                    devolucion_nueva = generar_devolucion_pedagogica(
+                        payload_evo, api_key=api_key, provider=proveedor
+                    )
+                st.session_state["devolucion_delta"] = devolucion_nueva
+                st.session_state["devolucion_delta_ids"] = identidad_delta
+
+            # Renderizar desde caché si existe
+            devolucion_evo = st.session_state.get("devolucion_delta")
+            if devolucion_evo is not None:
+                _renderizar_devolucion(devolucion_evo)
+            else:
+                st.info(
+                    "Pulsa el botón para generar la devolución pedagógica con IA "
+                    "a partir de las métricas de evolución."
+                )
+                # M3: sin devolución generada el PDF se exporta SIN la sección IA.
+                st.warning(
+                    "⚠️ Todavía no generaste la devolución: el PDF de evolución se "
+                    "exportará SIN la sección 'DICTAMEN PEDAGÓGICO DEL INSTRUCTOR "
+                    "(IA)'."
+                )
 
             # --- Descarga del PDF de evolución (core.report_generator) ---
             st.markdown("---")
@@ -849,8 +1021,11 @@ with tab2:
                 session_id_pre, session_id_post, devolucion=devolucion_evo
             )
             if pdf_evo_bytes:
+                etiqueta_pdf = "⬇️ Descargar PDF de evolución"
+                if devolucion_evo is None:
+                    etiqueta_pdf += " (sin dictamen IA)"
                 st.download_button(
-                    "⬇️ Descargar PDF de evolución",
+                    etiqueta_pdf,
                     data=pdf_evo_bytes,
                     file_name=f"evolucion_{session_id_pre}_a_{session_id_post}.pdf",
                     mime="application/pdf",
