@@ -3,7 +3,7 @@
 #
 # Dos pestañas de trabajo (Diagnóstico de Admisión y Comparativa Delta),
 # persistencia con st.session_state, caché de cálculos pesados y gráficos
-# interactivos con ALTAIR (Plotly NO está instalado en el entorno).
+# interactivos con PLOTLY.
 #
 # La lógica de evaluación vive en core.evaluador_diagnostico (lógica pura); esta
 # capa solo orquesta la UI, la ingesta de PDFs y la visualización.
@@ -14,10 +14,10 @@ import os
 import shutil
 import sys
 import tempfile
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-import altair as alt
-import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
 import streamlit as st
 
 # --- Rutas del proyecto ---
@@ -26,11 +26,8 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 # --- Importaciones del núcleo ---
-from core.analizador_eventos import generar_feedback, extraer_eventos_crudos
 from core.pipeline import process_simulator_pdf
 from core.db_manager import get_db_connection
-from core.reporter import generar_texto_reporte_individual, generar_reporte_evolucion
-from core.behavior_analyzer import analizar_comportamiento_completo
 # Import DEFENSIVO: core.report_generator depende de 'fpdf' (fpdf2), que puede no
 # estar instalado en el entorno. Si falta, la app DEBE seguir arrancando y solo se
 # deshabilita la exportación a PDF, nunca se cae con ModuleNotFoundError.
@@ -62,6 +59,16 @@ GRAFICOS_DISPONIBLES = [
     'Acceleration Pad', 'Fork Height In Mtrs', 'Tilt Angle In Deg'
 ]
 
+# Unidades físicas por señal para el eje Y.
+UNIDADES_SENAL = {
+    'Steering': '° (grados)',
+    'Speed In Km/h': 'Km/h',
+    'Brake Pad': 'Presión',
+    'Acceleration Pad': 'Aceleración',
+    'Fork Height In Mtrs': 'Metros',
+    'Tilt Angle In Deg': 'Grados',
+}
+
 RUTAS_DE_APRENDIZAJE = {
     "Novato": {"titulo": "Ruta de Iniciación", "ejercicios": ["1.1. Controles", "2.1. Conducción básica"]},
     "Sin nocion del espacio": {"titulo": "Ruta de Precisión Espacial", "ejercicios": ["2.2. Curvas en S", "5.7. Carga Vertical"]},
@@ -70,7 +77,7 @@ RUTAS_DE_APRENDIZAJE = {
     "Eficiente": {"titulo": "Ruta de Especialización", "ejercicios": ["Módulo 8 (Cargas Pesadas)"]}
 }
 
-# --- Paleta canónica (theme de app.py) ---
+# --- Paleta canónica ---
 COLOR_ACCENT = "#4A90E2"   # azul
 COLOR_SUCCESS = "#00A67E"  # verde
 COLOR_WARNING = "#F5A524"  # naranja
@@ -94,16 +101,14 @@ _COLORES_EVOLUCION = {
     "SIN DATOS": COLOR_DANGER,
 }
 
-# Criterio de color de los deltas en st.metric (documentado):
-#   * Colisiones / Frenadas / Volantazos / Suavidad -> una REDUCCIÓN es MEJORA
-#     (delta_color="inverse").
-#   * Puntaje depurado -> un AUMENTO es MEJORA (delta_color="normal").
-#   * Duración -> completar el ejercicio en MENOS tiempo se interpreta como mayor
-#     eficiencia/fluidez, por lo que una REDUCCIÓN es MEJORA (delta_color="inverse").
+# Criterio de color de los deltas en st.metric:
+#   * Colisiones / Frenadas / Volantazos / Suavidad -> REDUCCIÓN es MEJORA (inverse).
+#   * Puntaje depurado -> AUMENTO es MEJORA (normal).
+#   * Duración -> MENOS tiempo = mayor eficiencia (inverse).
 
 
 # =============================================================================
-# ADAPTER DE INGESTA (se conserva y reutiliza)
+# ADAPTER DE INGESTA
 # =============================================================================
 def _procesar_reporte(pdf_path: str) -> Optional[int]:
     """Adapter fino de UI: delega 100% en ``core.pipeline.process_simulator_pdf``."""
@@ -130,15 +135,10 @@ def _procesar_reporte(pdf_path: str) -> Optional[int]:
 
 
 # =============================================================================
-# HELPERS DE DATOS / SANEADO (S4)
+# HELPERS DE DATOS / SANEADO
 # =============================================================================
 def _sanear_info_sesion(info: Optional[dict]) -> Dict[str, Any]:
-    """Sanea una fila de ``Sesiones`` para que la exportación PDF no falle (S4).
-
-    Convierte numéricos ``None`` -> 0 y textos ``None`` -> 'N/A', evitando
-    ``AttributeError`` (``perfil.upper()``) y errores de formato (``:.2f``) cuando
-    la BD tiene NULLs.
-    """
+    """Sanea una fila de ``Sesiones`` para que la exportación PDF no falle."""
     saneado: Dict[str, Any] = dict(info) if info else {}
     for clave_num in ("puntaje_final", "duracion_segundos", "puntaje_depurado"):
         if saneado.get(clave_num) is None:
@@ -151,12 +151,12 @@ def _sanear_info_sesion(info: Optional[dict]) -> Dict[str, Any]:
 
 
 def _delta_str(valor_abs: str, pct: Optional[float]) -> str:
-    """Formatea el delta de un st.metric mostrando 'n/a' si el pct es None (C6)."""
+    """Formatea el delta de un st.metric mostrando 'n/a' si el pct es None."""
     return f"{valor_abs} ({pct:+.1f}%)" if pct is not None else f"{valor_abs} (n/a)"
 
 
 # =============================================================================
-# CÁLCULOS CACHEADOS (S6) — la conn NO es hashable, se abre dentro
+# CÁLCULOS CACHEADOS — la conn NO es hashable, se abre dentro
 # =============================================================================
 @st.cache_data(show_spinner=False)
 def _diagnostico_cacheado(session_id: int) -> Dict[str, Any]:
@@ -170,31 +170,6 @@ def _comparativa_cacheada(session_id_pre: int, session_id_post: int) -> Dict[str
     """Comparativa delta cacheada por par (pre, post)."""
     with get_db_connection(DB_PATH) as conn:
         return comparar_sesiones_delta(session_id_pre, session_id_post, conn)
-
-
-@st.cache_data(show_spinner=False)
-def _reporte_tecnico_cacheado(session_id: int) -> Tuple[str, Optional[bytes]]:
-    """Texto del reporte individual + bytes del PDF (si fpdf2 está disponible)."""
-    with get_db_connection(DB_PATH) as conn:
-        row = conn.execute(
-            "SELECT * FROM Sesiones WHERE id_sesion = ?", (session_id,)
-        ).fetchone()
-    info_sesion = _sanear_info_sesion(dict(row) if row else {})
-    analisis_comportamiento = analizar_comportamiento_completo(session_id)
-    perfil = info_sesion.get("perfil_operador") or "N/A"
-    datos = {
-        "info_sesion": info_sesion,
-        "perfil_predicho": perfil,
-        "ruta_recomendada": RUTAS_DE_APRENDIZAJE.get(perfil),
-        "analisis_comportamiento": analisis_comportamiento,
-    }
-    texto = generar_texto_reporte_individual(datos)
-    pdf_bytes: Optional[bytes] = None
-    if PDF_EXPORT_AVAILABLE and crear_reporte_pdf is not None:
-        buf = io.BytesIO()
-        crear_reporte_pdf(datos, buf)
-        pdf_bytes = buf.getvalue()
-    return texto, pdf_bytes
 
 
 @st.cache_data(show_spinner=False)
@@ -227,102 +202,131 @@ def _pdf_evolucion_cacheado(session_id_pre: int, session_id_post: int) -> Option
 
 
 def _invalidar_caches() -> None:
-    """Limpia las cachés de cálculo tras una ingesta nueva (S6)."""
+    """Limpia las cachés de cálculo tras una ingesta nueva."""
     _diagnostico_cacheado.clear()
     _comparativa_cacheada.clear()
-    _reporte_tecnico_cacheado.clear()
     _pdf_evolucion_cacheado.clear()
 
 
 # =============================================================================
-# HELPERS DE VISUALIZACIÓN (ALTAIR)
+# HELPERS DE VISUALIZACIÓN (PLOTLY)
 # =============================================================================
-def _tema_oscuro(chart: alt.Chart) -> alt.Chart:
-    """Aplica un tema oscuro coherente a un gráfico de Altair."""
-    return (
-        chart.configure(background="#0E1117")
-        .configure_axis(
-            labelColor="#B0B7C3", titleColor="#E6EAF0",
-            gridColor="#232833", domainColor="#3A4150",
-        )
-        .configure_legend(labelColor="#B0B7C3", titleColor="#E6EAF0")
-        .configure_view(stroke="#232833")
-        .configure_title(color="#E6EAF0", anchor="start", fontSize=14)
-    )
+_PLOTLY_LAYOUT_BASE = dict(
+    template="plotly_dark",
+    paper_bgcolor="rgba(0,0,0,0)",
+    plot_bgcolor="rgba(14,17,23,1)",
+    margin=dict(l=50, r=20, t=40, b=40),
+    font=dict(color="#B0B7C3"),
+    legend=dict(
+        orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+        font=dict(size=11),
+    ),
+)
 
 
-def _grafico_serie(series: Dict[str, List], senal: str) -> None:
-    """Dibuja una única señal de telemetría con Altair (línea azul)."""
+def _normalizar_tiempo(timestamps: List[float]) -> np.ndarray:
+    """Convierte timestamps absolutos a porcentaje de avance [0, 100].
+
+    Protege contra división por cero si la serie tiene un solo punto o es constante.
+    """
+    ts = np.array(timestamps, dtype=float)
+    if len(ts) < 2:
+        return np.zeros_like(ts)
+    span = ts[-1] - ts[0]
+    if abs(span) < 1e-9:
+        return np.zeros_like(ts)
+    return (ts - ts[0]) / span * 100.0
+
+
+def _grafico_serie_plotly(series: Dict[str, List], senal: str, height: int = 280) -> None:
+    """Dibuja una única señal de telemetría con Plotly (línea azul)."""
     puntos = series.get(senal) or []
     if not puntos:
-        st.warning(f"ℹ️ No hay datos de telemetría para '{senal}' en esta sesión.")
+        st.warning(f"ℹ️ No hay datos de telemetría para '{senal}'.")
         return
-    df = pd.DataFrame(puntos, columns=['tiempo', 'valor'])
-    chart = (
-        alt.Chart(df)
-        .mark_line(color=COLOR_ACCENT, strokeWidth=1.6)
-        .encode(
-            x=alt.X('tiempo:Q', title='Tiempo (s)'),
-            y=alt.Y('valor:Q', title=senal),
-            tooltip=[
-                alt.Tooltip('tiempo:Q', title='Tiempo (s)', format='.2f'),
-                alt.Tooltip('valor:Q', title='Valor', format='.2f'),
-            ],
-        )
-        .properties(title=senal, height=230)
-        .interactive()
+
+    tiempos = [p[0] for p in puntos]
+    valores = [p[1] for p in puntos]
+    unidad = UNIDADES_SENAL.get(senal, '')
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=tiempos, y=valores,
+        mode='lines',
+        line=dict(color=COLOR_ACCENT, width=1.6),
+        name=senal,
+    ))
+    fig.update_layout(
+        **_PLOTLY_LAYOUT_BASE,
+        height=height,
+        title=dict(text=senal, font=dict(size=13, color="#E6EAF0")),
+        xaxis_title="Tiempo (s)",
+        yaxis_title=unidad,
+        showlegend=False,
     )
-    st.altair_chart(_tema_oscuro(chart), use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True)
 
 
-def _grafico_superposicion(
+def _grafico_superposicion_plotly(
     series_pre: Dict[str, List],
     series_post: Dict[str, List],
     senal: str,
+    normalizado: bool = True,
+    height: int = 280,
 ) -> None:
-    """Superpone la señal del Día 1 (naranja discontinua) y Día Final (verde sólida)."""
-    filas: List[Dict[str, Any]] = []
-    for t, v in (series_pre.get(senal) or []):
-        filas.append({'tiempo': t, 'valor': v, 'dia': 'Día 1'})
-    for t, v in (series_post.get(senal) or []):
-        filas.append({'tiempo': t, 'valor': v, 'dia': 'Día Final'})
+    """Superpone Día 1 (naranja discontinua) y Día Final (verde sólida).
 
-    if not filas:
+    Si ``normalizado=True``, el eje X es 'Avance del Ejercicio (%)' de 0 a 100.
+    Si ``normalizado=False``, el eje X es 'Tiempo Real (s)'.
+    """
+    puntos_pre = series_pre.get(senal) or []
+    puntos_post = series_post.get(senal) or []
+
+    if not puntos_pre and not puntos_post:
         st.warning(f"ℹ️ Sin datos para superponer '{senal}'.")
         return
 
-    df = pd.DataFrame(filas)
-    chart = (
-        alt.Chart(df)
-        .mark_line(strokeWidth=2.0)
-        .encode(
-            x=alt.X('tiempo:Q', title='Tiempo (s)'),
-            y=alt.Y('valor:Q', title=senal),
-            color=alt.Color(
-                'dia:N',
-                scale=alt.Scale(domain=['Día 1', 'Día Final'],
-                                range=[COLOR_WARNING, COLOR_SUCCESS]),
-                legend=alt.Legend(title='Momento'),
-            ),
-            strokeDash=alt.StrokeDash(
-                'dia:N',
-                scale=alt.Scale(domain=['Día 1', 'Día Final'], range=[[6, 4], [0]]),
-                legend=None,
-            ),
-            tooltip=[
-                alt.Tooltip('dia:N', title='Momento'),
-                alt.Tooltip('tiempo:Q', title='Tiempo (s)', format='.2f'),
-                alt.Tooltip('valor:Q', title='Valor', format='.2f'),
-            ],
-        )
-        .properties(title=f"{senal} — Día 1 vs Día Final", height=280)
-        .interactive()
+    fig = go.Figure()
+
+    for puntos, etiqueta, color, dash in [
+        (puntos_pre, 'Día 1 (Pre)', COLOR_WARNING, 'dash'),
+        (puntos_post, 'Día Final (Post)', COLOR_SUCCESS, 'solid'),
+    ]:
+        if not puntos:
+            continue
+        tiempos = [p[0] for p in puntos]
+        valores = [p[1] for p in puntos]
+
+        if normalizado:
+            x_data = _normalizar_tiempo(tiempos)
+        else:
+            x_data = tiempos
+
+        fig.add_trace(go.Scatter(
+            x=x_data, y=valores,
+            mode='lines',
+            line=dict(color=color, width=2, dash=dash),
+            name=etiqueta,
+        ))
+
+    unidad = UNIDADES_SENAL.get(senal, '')
+    x_title = 'Avance del Ejercicio (%)' if normalizado else 'Tiempo Real (s)'
+
+    fig.update_layout(
+        **_PLOTLY_LAYOUT_BASE,
+        height=height,
+        title=dict(text=f"{senal} — Pre vs Post", font=dict(size=13, color="#E6EAF0")),
+        xaxis_title=x_title,
+        yaxis_title=unidad,
     )
-    st.altair_chart(_tema_oscuro(chart), use_container_width=True)
+    if normalizado:
+        fig.update_xaxes(range=[0, 100])
+
+    st.plotly_chart(fig, use_container_width=True)
 
 
 def _tarjeta_dictamen(sugerencia: str, justificacion: str) -> None:
-    """Renderiza la tarjeta semáforo con el veredicto de la IA en grande (H1: escapado)."""
+    """Renderiza la tarjeta semáforo con el veredicto de la IA."""
     color = _COLORES_DICTAMEN.get(sugerencia, COLOR_ACCENT)
     icono = _ICONOS_DICTAMEN.get(sugerencia, "ℹ️")
     texto_sug = html.escape(str(sugerencia))
@@ -344,7 +348,7 @@ def _tarjeta_dictamen(sugerencia: str, justificacion: str) -> None:
 
 
 def _tarjeta_foco(foco: str) -> None:
-    """Tarjeta destacada con el foco pedagógico sugerido (H1: escapado)."""
+    """Tarjeta destacada con el foco pedagógico sugerido."""
     texto_foco = html.escape(str(foco))
     st.markdown(
         f"""
@@ -360,7 +364,7 @@ def _tarjeta_foco(foco: str) -> None:
 
 
 def _mostrar_decision_guardada(decision: Optional[Dict[str, Any]]) -> None:
-    """Muestra la decisión persistida. Las notas libres van en st.text (H1: sin markdown)."""
+    """Muestra la decisión persistida."""
     if not decision:
         return
     veredicto = html.escape(str(decision.get("veredicto", "")))
@@ -370,20 +374,14 @@ def _mostrar_decision_guardada(decision: Optional[Dict[str, Any]]) -> None:
     if foco:
         st.caption(f"Foco sugerido: {html.escape(str(foco))}")
     st.text("Notas del instructor:")
-    # st.text NO renderiza markdown/HTML: seguro para texto libre del instructor.
     st.text(decision.get("notas") or "—")
 
 
 # =============================================================================
-# INGESTA DE PDF CON DEDUPLICACIÓN POR IDENTIDAD DE CONTENIDO (C8)
+# INGESTA DE PDF CON DEDUPLICACIÓN POR IDENTIDAD DE CONTENIDO
 # =============================================================================
 def _huella_archivo(archivo) -> Any:
-    """Identidad de contenido estable del archivo subido (C8).
-
-    Usa ``file_id`` si Streamlit lo expone; si no, una tupla (nombre, tamaño).
-    Evita el falso positivo de deduplicar solo por ``archivo.name`` (hay varios
-    'Report.pdf' distintos) y detecta cuando el contenido realmente cambia.
-    """
+    """Identidad de contenido estable del archivo subido."""
     file_id = getattr(archivo, "file_id", None)
     if file_id:
         return file_id
@@ -394,19 +392,8 @@ def _huella_archivo(archivo) -> Any:
     return (archivo.name, tam)
 
 
-def _ingesta_pdf(archivo, clave_estado_id: str, clave_estado_nombre: str,
-                 clave_estado_feedback: Optional[str] = None) -> Optional[int]:
-    """Guarda el PDF subido a un temporal con su NOMBRE ORIGINAL, lo procesa y cachea.
-
-    Correcciones C8:
-      * Deduplica por identidad de contenido (``_huella_archivo``), no por nombre.
-      * Marca la huella en session_state ANTES de procesar, para no relanzar el ETL
-        (OCR/visión) en cada rerun.
-      * Si el pipeline devuelve ``None`` (fallo), resetea la huella a ``None`` para
-        permitir un reintento explícito.
-      * Escribe el temporal con el nombre original dentro de un dir temporal, de
-        modo que la idempotencia del pipeline por ``nombre_archivo_origen`` funcione.
-    """
+def _ingesta_pdf(archivo, clave_estado_id: str, clave_estado_nombre: str) -> Optional[int]:
+    """Guarda el PDF subido a un temporal con su NOMBRE ORIGINAL, lo procesa y cachea."""
     if archivo is None:
         return st.session_state.get(clave_estado_id)
 
@@ -414,7 +401,6 @@ def _ingesta_pdf(archivo, clave_estado_id: str, clave_estado_nombre: str,
     if st.session_state.get(clave_estado_nombre) == huella:
         return st.session_state.get(clave_estado_id)
 
-    # Marcar ANTES de procesar evita reprocesar en reruns concurrentes/fallidos.
     st.session_state[clave_estado_nombre] = huella
 
     dir_tmp = tempfile.mkdtemp(prefix="titan_upload_")
@@ -427,17 +413,7 @@ def _ingesta_pdf(archivo, clave_estado_id: str, clave_estado_nombre: str,
         if session_id:
             st.session_state[clave_estado_id] = session_id
             _invalidar_caches()
-            if clave_estado_feedback is not None:
-                try:
-                    eventos = extraer_eventos_crudos(tmp_path)
-                    st.session_state[clave_estado_feedback] = (
-                        generar_feedback(eventos) if eventos else None
-                    )
-                except Exception as exc:  # pragma: no cover - defensa de UI
-                    st.session_state[clave_estado_feedback] = None
-                    st.warning(f"⚠️ No se pudo generar la devolución inteligente: {exc}")
         else:
-            # Fallo explícito: permitir reintento en el siguiente cambio de archivo.
             st.session_state[clave_estado_nombre] = None
     finally:
         shutil.rmtree(dir_tmp, ignore_errors=True)
@@ -459,7 +435,6 @@ st.set_page_config(
 for _clave, _default in (
     ("diag_session_id", None),
     ("diag_archivo_nombre", None),
-    ("diag_feedback", None),
     ("post_session_id", None),
     ("post_archivo_nombre", None),
 ):
@@ -502,15 +477,13 @@ with tab1:
         type=['pdf'],
         key="uploader_diagnostico",
     )
-    session_id_diag = _ingesta_pdf(
-        archivo_diag, "diag_session_id", "diag_archivo_nombre", "diag_feedback"
-    )
+    session_id_diag = _ingesta_pdf(archivo_diag, "diag_session_id", "diag_archivo_nombre")
 
     if not session_id_diag:
         st.info("ℹ️ Sube un reporte PDF para generar el diagnóstico de admisión.")
     else:
         st.markdown("---")
-        # Cálculo pesado cacheado (S6); la decisión se lee SIN caché (S6/barata).
+        # Fuente única de verdad: core.evaluador_diagnostico
         diagnostico = _diagnostico_cacheado(session_id_diag)
         with get_db_connection(DB_PATH) as conn:
             decision_previa = obtener_decision_instructor(session_id_diag, conn)
@@ -522,7 +495,7 @@ with tab1:
         st.subheader("🚦 2. Dictamen de la IA")
         _tarjeta_dictamen(diagnostico["sugerencia_admision"], diagnostico["justificacion"])
 
-        # --- Métricas calculadas clave ---
+        # --- Métricas calculadas clave (del evaluador) ---
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("🛑 Frenadas bruscas", metricas.get("frenadas_bruscas", 0))
         c2.metric("🌀 Volantazos", metricas.get("volantazos", 0))
@@ -551,8 +524,6 @@ with tab1:
         radio_key = f"radio_decision_{session_id_diag}"
         notas_key = f"notas_{session_id_diag}"
 
-        # Precarga de widgets con la decisión YA guardada (C2.4). Si no existe, se
-        # siembra con la sugerencia de la IA (mapeando 'No Apto Crítico' -> 'No Apto').
         if decision_previa and decision_previa.get("veredicto") in opciones:
             semilla_radio = decision_previa["veredicto"]
         else:
@@ -565,8 +536,6 @@ with tab1:
         st.session_state.setdefault(radio_key, semilla_radio)
         st.session_state.setdefault(notas_key, semilla_notas)
 
-        # Se pasa key= SIN index/value para que el widget tome la semilla de
-        # session_state (patrón recomendado: persiste y no genera warning).
         veredicto_instructor = st.radio(
             "Tu decisión de admisión:",
             opciones,
@@ -594,44 +563,21 @@ with tab1:
                     f"✅ Decisión '{veredicto_instructor}' guardada para la sesión "
                     f"#{session_id_diag}."
                 )
-                # S5: re-leer y pintar el estado FRESCO tras guardar.
                 with get_db_connection(DB_PATH) as conn:
                     decision_fresca = obtener_decision_instructor(session_id_diag, conn)
                 _mostrar_decision_guardada(decision_fresca)
             else:
                 st.error("⚠️ No se pudo guardar la decisión. Revisa la base de datos.")
 
-        # --- Gráficos interactivos de las 6 señales ---
+        # --- Gráficos interactivos: cuadrícula 2x3 ---
         st.markdown("---")
         st.subheader("📊 4. Telemetría de la sesión")
-        for senal in GRAFICOS_DISPONIBLES:
-            _grafico_serie(series, senal)
-
-        # --- Devolución inteligente y reporte técnico (ampliable) ---
-        feedback = st.session_state.get("diag_feedback")
-        if feedback:
-            with st.expander("🤖 Devolución inteligente (basada en eventos crudos)"):
-                st.markdown(feedback)
-
-        with st.expander("📑 Reporte técnico completo"):
-            st.caption(
-                "Reporte legacy de comportamiento (criterio propio de microajustes); "
-                "las métricas oficiales de admisión son las de las tarjetas superiores."
-            )
-            texto_reporte, pdf_bytes = _reporte_tecnico_cacheado(session_id_diag)
-            st.code(texto_reporte)
-            if PDF_EXPORT_AVAILABLE and pdf_bytes:
-                st.download_button(
-                    "⬇️ Descargar PDF del diagnóstico",
-                    data=pdf_bytes,
-                    file_name=f"diagnostico_sesion_{session_id_diag}.pdf",
-                    mime="application/pdf",
-                )
-            else:
-                st.info(
-                    "ℹ️ Exportación PDF no disponible: instala la dependencia con "
-                    "'pip install fpdf2'."
-                )
+        for fila in range(3):
+            col1, col2 = st.columns(2)
+            with col1:
+                _grafico_serie_plotly(series, GRAFICOS_DISPONIBLES[fila * 2], height=280)
+            with col2:
+                _grafico_serie_plotly(series, GRAFICOS_DISPONIBLES[fila * 2 + 1], height=280)
 
 # =============================================================================
 # PESTAÑA 2 — COMPARATIVA DELTA (DÍA FINAL)
@@ -646,7 +592,7 @@ with tab2:
                 "FROM Sesiones ORDER BY id_sesion"
             ).fetchall()
             sesiones_disp = [dict(f) for f in filas]
-    except Exception as exc:  # pragma: no cover - defensa de UI
+    except Exception as exc:
         st.error(f"⚠️ No se pudieron cargar las sesiones: {exc}")
 
     if not sesiones_disp:
@@ -671,9 +617,7 @@ with tab2:
             type=['pdf'],
             key="uploader_final",
         )
-        session_id_post = _ingesta_pdf(
-            archivo_post, "post_session_id", "post_archivo_nombre"
-        )
+        session_id_post = _ingesta_pdf(archivo_post, "post_session_id", "post_archivo_nombre")
 
         if not session_id_post:
             st.info("ℹ️ Sube el reporte PDF de la prueba final para comparar la evolución.")
@@ -681,9 +625,9 @@ with tab2:
             st.warning("⚠️ La sesión Pre y Post son la misma. Selecciona sesiones distintas.")
         else:
             st.markdown("---")
+            # Fuente única de verdad: core.evaluador_diagnostico
             comparativa = _comparativa_cacheada(session_id_pre, session_id_post)
 
-            # Validación de existencia (C3): no pintar nada con datos falsos.
             if comparativa.get("error"):
                 st.error(f"⚠️ {comparativa['error']}")
                 st.stop()
@@ -735,36 +679,42 @@ with tab2:
                 delta_color="normal",
             )
             st.caption(
-                "Δ Puntaje depurado derivado = puntaje_final + Σ penalizaciones "
-                "(las penalizaciones se almacenan en negativo). Suavidad = frenadas "
-                "bruscas + volantazos (delta calculado sobre totales)."
+                "Δ Puntaje depurado = puntaje_final + Σ penalizaciones. "
+                "Suavidad = frenadas bruscas + volantazos."
             )
 
-            # --- Gráficos de superposición ---
+            # --- Gráficos de superposición con normalización temporal ---
             st.markdown("---")
-            st.subheader("📈 Superposición de señales (Día 1 vs Día Final)")
-            col_a, col_b = st.columns(2)
-            pares = [
-                (col_a, 'Steering'),
-                (col_b, 'Brake Pad'),
-                (col_a, 'Speed In Km/h'),
-                (col_b, 'Fork Height In Mtrs'),
-            ]
-            for col, senal in pares:
-                with col:
-                    _grafico_superposicion(
-                        comparativa["series_pre"], comparativa["series_post"], senal
+            st.subheader("📈 Superposición de señales (Pre vs Post)")
+
+            usar_normalizado = st.checkbox(
+                "Avance Normalizado (%) — desmarcar para ver Tiempo Real (s)",
+                value=True,
+                key="chk_normalizar_tiempo",
+                help=(
+                    "Normalizado: ambas curvas se alinean de 0% a 100% del avance "
+                    "del ejercicio, independientemente de su duración absoluta."
+                ),
+            )
+
+            # Cuadrícula compacta 2 columnas x 3 filas
+            for fila in range(3):
+                col1, col2 = st.columns(2)
+                with col1:
+                    _grafico_superposicion_plotly(
+                        comparativa["series_pre"], comparativa["series_post"],
+                        GRAFICOS_DISPONIBLES[fila * 2],
+                        normalizado=usar_normalizado, height=280,
+                    )
+                with col2:
+                    _grafico_superposicion_plotly(
+                        comparativa["series_pre"], comparativa["series_post"],
+                        GRAFICOS_DISPONIBLES[fila * 2 + 1],
+                        normalizado=usar_normalizado, height=280,
                     )
 
-            # --- Resumen de evolución imprimible ---
+            # --- Descarga del PDF de evolución ---
             st.markdown("---")
-            st.subheader("📄 Resumen de evolución técnica")
-            st.code(comparativa["resumen_evolucion"], language="text")
-
-            with st.expander("🔎 Reporte de evolución (texto clásico)"):
-                st.code(generar_reporte_evolucion(session_id_pre, session_id_post))
-
-            # --- Descarga del PDF de evolución (protegida si falta fpdf2) ---
             pdf_evo_bytes = _pdf_evolucion_cacheado(session_id_pre, session_id_post)
             if PDF_EXPORT_AVAILABLE and pdf_evo_bytes:
                 st.download_button(

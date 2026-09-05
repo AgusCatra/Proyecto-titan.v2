@@ -1078,3 +1078,154 @@ def obtener_decision_instructor(
     except sqlite3.Error:
         # Tabla inexistente u otro error: lectura degradada, sin escribir nada.
         return None
+
+
+# =============================================================================
+# API PÚBLICA — D) PAYLOAD JSON-SERIALIZABLE PARA LLM EXTERNA
+# =============================================================================
+def _a_float(valor: Any, default: float = 0.0) -> float:
+    """Convierte ``valor`` a ``float`` nativo de Python de forma defensiva.
+
+    Acepta numpy scalars, ``None`` y cualquier tipo no numérico: devuelve
+    ``default`` cuando la conversión no es posible, de modo que el resultado sea
+    SIEMPRE un ``float`` nativo serializable a JSON (nunca ``None`` ni numpy).
+    """
+    if valor is None:
+        return float(default)
+    try:
+        resultado = float(valor)
+    except (TypeError, ValueError):
+        return float(default)
+    # float() de un numpy.floatxx ya devuelve un float nativo de Python.
+    return resultado
+
+
+def _a_int(valor: Any, default: int = 0) -> int:
+    """Convierte ``valor`` a ``int`` nativo de Python de forma defensiva (nunca None)."""
+    if valor is None:
+        return int(default)
+    try:
+        return int(valor)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _a_str(valor: Any, default: str = "N/A") -> str:
+    """Convierte ``valor`` a ``str`` nativo; usa ``default`` si es ``None``/vacío."""
+    if valor is None:
+        return default
+    texto = str(valor).strip()
+    return texto if texto else default
+
+
+def obtener_payload_para_llm(
+    session_id_pre: int, session_id_post: int, conn: sqlite3.Connection
+) -> Dict[str, Any]:
+    """Construye un payload 100 % serializable a JSON para una API LLM externa.
+
+    Agrega, en un único dict plano y sin tipos exóticos (nada de numpy, ``datetime``
+    sin convertir, ``set`` o ``None``), la información de admisión de la sesión
+    diagnóstica (Pre), de la sesión final (Post) y de su comparativa de evolución.
+
+    La función es de SOLO LECTURA: reutiliza :func:`evaluar_diagnostico_inicial`
+    (para ambas sesiones) y :func:`comparar_sesiones_delta` (para la evolución),
+    sin modificar el comportamiento de las APIs públicas existentes.
+
+    Tolerancia a fallos:
+      * Si ``session_id_post`` no existe, se devuelve el payload únicamente con los
+        datos de Pre; los campos de Post quedan en ``0`` / ``"N/A"`` y el veredicto
+        de evolución en ``"SIN DATOS"`` (nunca se fabrica una mejora falsa).
+      * Cualquier métrica ausente (señal de telemetría faltante, columna inexistente,
+        porcentaje no definido) se degrada a ``0`` / ``0.0`` / ``"N/A"``, nunca a
+        ``None`` que rompería el contrato JSON.
+
+    Args:
+        session_id_pre: identificador de la sesión diagnóstica (Día 1).
+        session_id_post: identificador de la sesión final (Día Final).
+        conn: conexión SQLite abierta (idealmente con ``row_factory=sqlite3.Row``).
+
+    Returns:
+        Dict con las claves ``metadatos``, ``fisicas_clave`` y ``diagnostico``,
+        listo para ``json.dumps`` sin argumentos por defecto.
+    """
+    # --- Diagnósticos independientes de cada sesión (tolerantes a inexistentes) ---
+    diag_pre = evaluar_diagnostico_inicial(session_id_pre, conn)
+    diag_post = evaluar_diagnostico_inicial(session_id_post, conn)
+    metricas_pre = diag_pre.get("metricas_calculadas", {}) or {}
+    metricas_post = diag_post.get("metricas_calculadas", {}) or {}
+
+    existe_pre = bool(metricas_pre.get("sesion_existente"))
+    existe_post = bool(metricas_post.get("sesion_existente"))
+
+    # --- Comparativa de evolución (nunca lanza; degrada a "SIN DATOS") ---
+    delta = comparar_sesiones_delta(session_id_pre, session_id_post, conn)
+    deltas = delta.get("deltas", {}) or {}
+
+    # --- Metadatos de la sesión Pre (operador / ejercicio) desde ``Sesiones`` ---
+    meta_pre = _obtener_metadata_sesion(session_id_pre, conn)
+    meta_post = _obtener_metadata_sesion(session_id_post, conn)
+    # El operador/ejercicio se toman de Pre; si Pre no existe, se intenta con Post.
+    meta_fuente = meta_pre if meta_pre is not None else meta_post
+    operador = _a_str(_campo(meta_fuente, "nombre_operador", "N/A"))
+    ejercicio = _a_str(_campo(meta_fuente, "nombre_ejercicio", "N/A"))
+
+    # --- Duraciones y delta de puntaje (nativos, nunca None) ---
+    duracion_pre = _a_float(metricas_pre.get("tiempo_total_segundos", 0.0))
+    duracion_post = _a_float(metricas_post.get("tiempo_total_segundos", 0.0))
+    delta_puntaje = _a_float(deltas.get("puntaje_depurado", 0.0))
+    delta_puntaje_pct = _a_float(deltas.get("puntaje_depurado_pct"), default=0.0)
+
+    metadatos: Dict[str, Any] = {
+        "operador": operador,
+        "ejercicio": ejercicio,
+        "duracion_pre_segundos": round(duracion_pre, 2),
+        "duracion_post_segundos": round(duracion_post, 2),
+        "delta_puntaje": round(delta_puntaje, 2),
+        "delta_puntaje_pct": round(delta_puntaje_pct, 2),
+    }
+
+    fisicas_clave: Dict[str, Any] = {
+        "frenadas_bruscas_pre": _a_int(metricas_pre.get("frenadas_bruscas", 0)),
+        "frenadas_bruscas_post": _a_int(metricas_post.get("frenadas_bruscas", 0)),
+        "volantazos_pre": _a_int(metricas_pre.get("volantazos", 0)),
+        "volantazos_post": _a_int(metricas_post.get("volantazos", 0)),
+        "colisiones_netas_pre": _a_int(metricas_pre.get("colisiones_netas", 0)),
+        "colisiones_netas_post": _a_int(metricas_post.get("colisiones_netas", 0)),
+        "tiempo_horquilla_alta_pre_seg": round(
+            _a_float(metricas_pre.get("traslado_horquilla_alta_segundos", 0.0)), 2
+        ),
+        "tiempo_horquilla_alta_post_seg": round(
+            _a_float(metricas_post.get("traslado_horquilla_alta_segundos", 0.0)), 2
+        ),
+    }
+
+    diagnostico: Dict[str, Any] = {
+        "sugerencia_admision_pre": _a_str(diag_pre.get("sugerencia_admision", "N/A")),
+        "sugerencia_admision_post": _a_str(diag_post.get("sugerencia_admision", "N/A")),
+        "veredicto_evolucion": _a_str(delta.get("veredicto_evolucion", "SIN DATOS")),
+        # El foco del instructor se toma de la sesión diagnóstica (Pre): es el punto
+        # de partida pedagógico. Si Post no existe, sigue siendo coherente.
+        "foco_instructor": _a_str(
+            diag_pre.get("foco_instructor") or diag_post.get("foco_instructor"), "N/A"
+        ),
+    }
+
+    payload: Dict[str, Any] = {
+        "metadatos": metadatos,
+        "fisicas_clave": fisicas_clave,
+        "diagnostico": diagnostico,
+    }
+
+    # Aviso explícito cuando falta la sesión Post (payload solo con datos de Pre).
+    if not existe_post:
+        payload["advertencia"] = (
+            f"La sesión Post ({session_id_post}) no existe en la base de datos; "
+            "el payload refleja únicamente los datos de la sesión Pre."
+        )
+    elif not existe_pre:
+        payload["advertencia"] = (
+            f"La sesión Pre ({session_id_pre}) no existe en la base de datos; "
+            "los valores de Pre son neutros (0 / N/A)."
+        )
+
+    return payload
