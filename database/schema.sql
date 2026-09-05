@@ -59,3 +59,21 @@ CREATE TABLE Telemetria (
 CREATE INDEX idx_sesiones_operador ON Sesiones(nombre_operador);
 CREATE INDEX idx_sesiones_perfil ON Sesiones(perfil_operador);
 CREATE INDEX idx_telemetria_sesion ON Telemetria(id_sesion_fk);
+
+--
+-- Tabla: DecisionInstructor (NUEVA - evaluación pedagógica)
+-- Almacena la decisión/fallo del instructor sobre el diagnóstico de admisión de
+-- una sesión. Se crea con IF NOT EXISTS (sin DROP) para no perder datos en BD
+-- existentes; el módulo core/evaluador_diagnostico.py la asegura en runtime.
+--
+CREATE TABLE IF NOT EXISTS DecisionInstructor (
+    id_decision INTEGER PRIMARY KEY AUTOINCREMENT,
+    id_sesion INTEGER NOT NULL UNIQUE,
+    veredicto TEXT NOT NULL,
+    foco_sugerido TEXT,
+    notas TEXT,
+    fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(id_sesion) REFERENCES Sesiones(id_sesion) ON DELETE CASCADE
+);
+
+-- UNIQUE(id_sesion) ya crea un índice implícito; no se añade índice redundante.
