@@ -482,9 +482,11 @@ def _normalizar_payload(payload: Any) -> Tuple[Dict[str, Any], List[str]]:
         diagnostico.get("justificacion_post"), _texto(diagnostico.get("justificacion_pre"))
     )
     vista["foco_instructor"] = _texto(diagnostico.get("foco_instructor"))
-    vista["hallazgos"] = list(
-        diagnostico.get("hallazgos_post") or diagnostico.get("hallazgos_pre") or []
-    )
+    hallazgos_post = diagnostico.get("hallazgos_post")
+    if hallazgos_post is not None:
+        vista["hallazgos"] = list(hallazgos_post)
+    else:
+        vista["hallazgos"] = list(diagnostico.get("hallazgos_pre") or [])
     vista["nivel_riesgo"] = _texto(diagnostico.get("nivel_riesgo_post")) or (
         nivel_riesgo_por_dictamen(vista["sugerencia_admision"])
     )
