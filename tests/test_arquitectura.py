@@ -12,6 +12,7 @@ from conftest import PROJECT_ROOT
 
 CORE_DIR = os.path.join(PROJECT_ROOT, "core")
 UI_DIR = os.path.join(PROJECT_ROOT, "ui")
+API_DIR = os.path.join(PROJECT_ROOT, "api")
 STREAMLIT_APP = os.path.join(PROJECT_ROOT, "streamlit_app.py")
 REPORT_GENERATOR = os.path.join(CORE_DIR, "report_generator.py")
 AI_ADVISOR = os.path.join(CORE_DIR, "ai_advisor.py")
@@ -53,6 +54,18 @@ def _archivos_python(carpeta: str):
         for nombre in os.listdir(carpeta)
         if nombre.endswith(".py")
     )
+
+
+def _archivos_python_recursivos(carpeta: str):
+    """Todos los ``*.py`` bajo ``carpeta`` (recursivo), para paquetes como ``api/``."""
+    if not os.path.isdir(carpeta):
+        return []
+    encontrados = []
+    for raiz, _dirs, archivos in os.walk(carpeta):
+        for nombre in archivos:
+            if nombre.endswith(".py"):
+                encontrados.append(os.path.join(raiz, nombre))
+    return sorted(encontrados)
 
 
 def _imports_totales(ruta: str):
@@ -188,3 +201,63 @@ def test_modulos_huerfanos_eliminados_de_core():
     assert "training_manager.py" not in existentes
     assert "training_path.py" not in existentes
     assert "plotter.py" not in existentes
+
+
+# =============================================================================
+# CAPA REST (api/) — MISMAS FRONTERAS QUE streamlit_app.py
+# =============================================================================
+# Estas guardas son ESTÁTICAS (leen el fuente con ``ast``/texto): NO importan
+# ``fastapi`` ni ningún módulo de ``api/``, de modo que siguen pasando aunque la
+# dependencia web no esté instalada. No se añade guarda de importabilidad de api/
+# precisamente para no requerir fastapi en la suite de arquitectura.
+
+# Etiquetas de negocio que la API debe IMPORTAR de core, nunca hardcodear.
+_CADENAS_DICTAMEN_PROHIBIDAS = (
+    "No Apto Crítico",
+    "MEJORA SIGNIFICATIVA",
+    "MEJORA MODERADA",
+    "REGRESIÓN DETECTADA",
+    "RENDIMIENTO ESTANCADO",
+)
+
+
+@pytest.mark.parametrize(
+    "ruta", _archivos_python_recursivos(API_DIR), ids=os.path.basename
+)
+def test_api_no_depende_de_bibliotecas_de_ui(ruta):
+    """Ningún módulo de ``api/`` importa bibliotecas de UI/gráficas."""
+    prohibidas = _imports_totales(ruta) & BIBLIOTECAS_UI
+    assert not prohibidas, (
+        f"{os.path.relpath(ruta, PROJECT_ROOT)} depende de bibliotecas de UI "
+        f"{sorted(prohibidas)}; la capa REST solo envuelve core/ (sin frontend)"
+    )
+
+
+def test_api_no_escribe_sql():
+    """El acceso a datos de ``api/`` pasa por ``core.db_manager`` (sin SQL propio)."""
+    for ruta in _archivos_python_recursivos(API_DIR):
+        fuente = _fuente(ruta).upper()
+        for sentencia in ("SELECT ", "INSERT ", "UPDATE ", "DELETE ", "CREATE TABLE"):
+            assert sentencia not in fuente, (
+                f"{os.path.relpath(ruta, PROJECT_ROOT)} contiene SQL "
+                f"('{sentencia.strip()}'); el acceso a datos vive en core/db_manager.py"
+            )
+
+
+def test_api_no_hardcodea_las_reglas_de_dictamen():
+    """``api/`` importa dictámenes/veredictos de core, nunca los hardcodea."""
+    for ruta in _archivos_python_recursivos(API_DIR):
+        fuente = _fuente(ruta)
+        for etiqueta in _CADENAS_DICTAMEN_PROHIBIDAS:
+            assert etiqueta not in fuente, (
+                f"{os.path.relpath(ruta, PROJECT_ROOT)} hardcodea la etiqueta de "
+                f"negocio '{etiqueta}'; debe importarse de core.evaluador_diagnostico"
+            )
+
+
+def test_core_no_importa_api():
+    """Dependencia en un solo sentido: ``core/`` jamás importa la capa ``api/``."""
+    for ruta in _archivos_python(CORE_DIR):
+        assert "api" not in _imports_totales(ruta), (
+            f"{os.path.basename(ruta)} importa la capa api/: dependencia invertida"
+        )

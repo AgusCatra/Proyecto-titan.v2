@@ -2,25 +2,25 @@
 
 > **Purpose:** Evidence-based snapshot of the AppTitan (Proyecto Titán v2) codebase, produced for downstream consumption by a Software Architect agent that will plan AppTitan's integration as a **microservice** inside the **SimuTwin** platform.
 > **Audience:** An LLM acting as Software Architect. Prefer facts, file paths, and severity over prose.
-> **Method:** Static analysis of 100% of first-party Python sources (`core/`, `ui/`, entry scripts, `tests/`, config), the SQL DDL, the live SQLite database, and `requirements.txt`. No assumptions were made where code could be read.
-> **Repository state:** Single-package Python monorepo, no build system, no API layer, no containerization, no CI.
-> **Revision:** Updated after the completed cleanup/decoupling refactor — dead modules and root debug scripts deleted, `core/plotter.py` migrated to the new `ui/` package, ETL orchestration unified in `core/pipeline.py`, `PyMuPDF` dropped, and a formal pytest suite added under `tests/`. Sections that were resolved by this refactor are marked **✅ RESOLVED**.
+> **Method:** Static analysis of 100% of first-party Python sources (`core/`, `ui/`, `api/`, entry scripts, `tests/`, config), the SQL DDL, the live SQLite database, and `requirements.txt`. No assumptions were made where code could be read.
+> **Repository state:** Single-package Python monorepo, no build system, **now with a FastAPI REST layer (`api/`)**, no containerization, no CI.
+> **Revision:** Updated after the completed cleanup/decoupling refactor **plus the new REST API layer** — dead modules and root debug scripts deleted, `core/plotter.py` migrated to the new `ui/` package, ETL orchestration unified in `core/pipeline.py`, `PyMuPDF` dropped, a formal pytest suite added under `tests/`, and the UI-agnostic `core/` is now **exposed over HTTP through a new FastAPI package `api/`** (`api.main:app`). Sections that were resolved by these passes are marked **✅ RESOLVED**.
 
 ---
 
 ## 0. Executive Summary
 
-AppTitan is a **desktop/batch analytics tool** — not a service. It ingests forklift-simulator PDF reports, extracts session metadata + telemetry curves, classifies the operator into a behavior profile, and renders text/PDF/chart output through **two independent frontends** (CustomTkinter desktop and Streamlit web) that share a UI-agnostic `core/` package and a local SQLite file.
+AppTitan is a **desktop/batch analytics tool** that has grown a **service surface**. It ingests forklift-simulator PDF reports, extracts session metadata + telemetry curves, classifies the operator into a behavior profile, and renders text/PDF/chart output through **two independent frontends** (CustomTkinter desktop and Streamlit web) that share a UI-agnostic `core/` package and a local SQLite file. That same headless `core/` is now **also exposed over HTTP** through a new FastAPI package `api/` (`api.main:app`), giving a third, network-callable consumer of the domain logic.
 
-> **Refactor status (this revision):** The cleanup/decoupling pass is **complete**. `core/` is now **100% UI-agnostic** (no GUI toolkit imports; enforced by an AST guard in `tests/test_arquitectura.py`), the desktop chart coupling moved to a new `ui/` package, the duplicated ETL orchestration was consolidated into `core/pipeline.py::process_simulator_pdf`, the orphaned `training_manager.py`/`training_path.py` and all root debug/ad-hoc scripts were deleted, `PyMuPDF` was dropped from `requirements.txt`, and a formal pytest suite now lives under `tests/`. `core/` is decoupled and **ready to be exposed as a REST API**; `streamlit_app.py` remains the active test bench.
+> **Refactor status (this revision):** The cleanup/decoupling pass is **complete** and the REST layer is **built**. `core/` is now **100% UI-agnostic** (no GUI toolkit imports; enforced by an AST guard in `tests/test_arquitectura.py`), the desktop chart coupling moved to a new `ui/` package, the duplicated ETL orchestration was consolidated into `core/pipeline.py::process_simulator_pdf`, the orphaned `training_manager.py`/`training_path.py` and all root debug/ad-hoc scripts were deleted, `PyMuPDF` was dropped from `requirements.txt`, and a formal pytest suite now lives under `tests/`. On top of that headless core, a **FastAPI package `api/`** now exposes the diagnostic/delta/pedagogical-feedback endpoints as REST (Pydantic v2 schemas, CORS, centralized error handling, safe multipart ingest) with its own contract tests (`tests/test_api.py`). `core/` is decoupled and **is now served as a REST API**; `streamlit_app.py` remains the active visual test bench.
 
-**Readiness verdict for microservice extraction: IMPROVED — domain core is now headless and REST-ready, but service/config/packaging layers are still absent.**
+**Readiness verdict for microservice extraction: SUBSTANTIALLY IMPROVED — the domain core is headless and is now wrapped by a working FastAPI service layer (`api/`); config injection is still partial and packaging/deploy (Docker/CI) plus the persistence redesign remain absent.**
 
 | Dimension | Status | Note |
 |---|---|---|
 | Domain logic isolation (`core/`) | **Good** | `core/` is UI-agnostic; shared orchestration now lives in `core/pipeline.py` and is consumed by both frontends |
-| Service/API layer | Absent | No FastAPI/Flask/HTTP surface yet, but `core/` can now be lifted headless |
-| Configuration management | Absent | Zero env vars; all paths, thresholds, page numbers hardcoded |
+| Service/API layer | **Present (FastAPI)** | New package `api/` (`api.main:app`) wraps the headless `core/` as REST; Swagger at `/docs`, OpenAPI at `/openapi.json`; contract-tested in `tests/test_api.py` |
+| Configuration management | Partial | Env vars now exist — `TITAN_API_CORS_ORIGINS` (API CORS) and `AI_API_KEY`/`AI_BASE_URL`/`AI_MODEL` (`core.ai_advisor`); paths/thresholds/page numbers are still hardcoded |
 | Persistence | SQLite file | Denormalized time-series stored as CSV-in-TEXT; destructive schema init |
 | Packaging / deploy | Absent | No Docker, no lockfile separation, no CI, undocumented OS dep (Tesseract) |
 | Test suite | **Present (pytest)** | Formal suite under `tests/` (fixtures + assertions) incl. an AST architecture guard and a relocated ETL smoke test (`tests/test_pipeline_smoke.py`) |
@@ -28,7 +28,7 @@ AppTitan is a **desktop/batch analytics tool** — not a service. It ingests for
 | Correctness | Improved | Orphaned training module removed; extractor→mapper contract normalized; single-class ML collapse remains a data concern |
 
 **Top remaining blockers to resolve before integration work:**
-1. **No service boundary / no config injection** — everything is hardcoded relative paths and a local file DB (§6-E, §6-H).
+1. **Config injection & packaging still open** — a REST service boundary now exists (`api/`), but paths/thresholds remain hardcoded relative paths against a local file DB, and there is no Docker/CI (§6-E, §6-H).
 2. **Denormalized, non-queryable telemetry storage** and SQLite concurrency limits (§6-F, §6-J).
 3. **Degenerate ML model** — classifier still risks single-class collapse without a curated/balanced dataset (§6-I).
 
@@ -38,7 +38,7 @@ AppTitan is a **desktop/batch analytics tool** — not a service. It ingests for
 
 ### 1.1 Language & Runtime
 - **Language:** Python 3 (modern type hints, `numpy` 2.x / `pandas` 2.x era). Exact minor version is **not pinned anywhere** (no `pyproject.toml`, no `runtime.txt`, no `.python-version`).
-- **Package manager:** `pip` against a flat, fully-pinned `requirements.txt` (60 packages). The file is a **`pip freeze` dump**: it mixes ~14 direct dependencies with ~46 transitive ones, with no grouping, no comments, and no direct/transitive separation. No lockfile tooling (pip-tools / poetry / uv) is present.
+- **Package manager:** `pip` against a flat, fully-pinned `requirements.txt` (77 packages). The file is a **`pip freeze` dump**: it mixes direct dependencies with transitive ones, with no grouping, no comments, and no direct/transitive separation. No lockfile tooling (pip-tools / poetry / uv) is present. The REST layer added `fastapi`, `uvicorn[standard]`, `pydantic` (v2), `httpx` (for `TestClient`), and `python-multipart` (for the ingest routes) plus their transitive pins (`starlette`, `anyio`, `h11`, `httptools`, `watchfiles`, `websockets`, `annotated-types`, `pydantic_core`, …); `pip check` is clean.
 
 ### 1.2 Frontends (two, independent)
 | Framework | Version | Where | Role |
@@ -78,9 +78,21 @@ AppTitan uses **three** different PDF/imaging libraries in the production path (
 ### 1.5 Persistence
 - **SQLite 3** via the Python stdlib `sqlite3` module. **No ORM** (no SQLAlchemy/Django), no migration tool (no Alembic). Raw SQL strings throughout.
 
-### 1.6 Notably Absent (relevant to SimuTwin)
-- **No web/API framework:** no FastAPI, Flask, or uvicorn anywhere (grep-confirmed). There is currently **no way to call AppTitan over a network**.
-- **No environment/config system:** zero uses of `os.environ` / `getenv` (grep-confirmed). No `.env`, no settings module, no secrets handling.
+### 1.6 REST API / Service Layer (NEW)
+| Library | Version | Role |
+|---|---|---|
+| **fastapi** | 0.141.1 | HTTP framework; the app object is `api.main:app` (run with `uvicorn api.main:app --reload`) |
+| **uvicorn[standard]** | 0.52.4 | ASGI server for the FastAPI app |
+| **pydantic** | 2.13.5 | v2 request/response models in `api/schemas.py` (`ConfigDict`, `field_validator`, `model_validator`) |
+| **starlette** | 1.6.0 | Transitive ASGI toolkit under FastAPI (routing, `CORSMiddleware`, `JSONResponse`) |
+| **httpx** | 0.28.1 | Test transport for `fastapi.testclient.TestClient` in `tests/test_api.py` |
+| **python-multipart** | 0.0.32 | Required by FastAPI to declare `UploadFile = File(...)`; gates the two multipart ingest routes |
+
+> **Service layering note:** `api/` is a thin REST adapter over `core/`. The dependency direction is strictly **`api` → `core`** (`core/` never imports `api/`, enforced by `test_core_no_importa_api` in `tests/test_arquitectura.py`). `api/` writes **no SQL** of its own (all data access goes through `core.db_manager`) and **hardcodes no business labels** — dictamen/riesgo/veredicto `Literal` types are built from constants imported from `core.evaluador_diagnostico` / `core.ai_advisor`.
+
+### 1.7 Notably Absent / Corrected (relevant to SimuTwin)
+- **Web/API framework:** now **PRESENT** — FastAPI + uvicorn + pydantic power the new `api/` package (§1.6). AppTitan **can now be called over a network** via `api.main:app` (Swagger UI at `/docs`, OpenAPI schema at `/openapi.json`).
+- **Environment/config system:** **partially present** — env vars are now read: `TITAN_API_CORS_ORIGINS` (comma-separated CORS allow-list in `api/main.py`, wildcard `["*"]` default is dev-only) and, in `core/ai_advisor.py`, `AI_API_KEY` (with legacy `TITAN_LLM_API_KEY` fallback), `AI_BASE_URL`, and `AI_MODEL`. There is still **no `.env` loader wired into `core/`, no settings module, and no externalization of paths/thresholds/page numbers** (see §6-E).
 - **No containerization/CI:** no `Dockerfile`, `docker-compose`, `*.yml/*.yaml`, `pyproject.toml`, or `pytest.ini` (glob-confirmed). A `tests/conftest.py` and a formal pytest suite now exist under `tests/`, but there is still no CI wiring.
 - **`README.md` is empty.** `.gitignore` now excludes the generated artifacts and the live DB (`debug_outputs/`, `data/exports/`, `*.db`/`*.sqlite`, `.qoder/`, `.pytest_cache/`, `.env`), so those are no longer version-controlled.
 
@@ -111,6 +123,20 @@ Proyecto-titan.v2/
 │   ├── __init__.py                # package marker
 │   └── plotter.py                 # v3.0 — Matplotlib chart embedded in CustomTkinter (migrated from core/plotter.py)
 │
+├── api/                           # REST adapter layer (NEW) — FastAPI app exposing core/ over HTTP
+│   ├── __init__.py                # package marker
+│   ├── main.py                    # FastAPI init + CORS (env TITAN_API_CORS_ORIGINS) + metadata + /health
+│   │                              #   + centralized exception handlers (500 no-leak, 422 strips raw input)
+│   ├── deps.py                    # get_db_path (test override point) + conexion_bd_o_503 (DB-acquire→503 only)
+│   ├── schemas.py                 # Pydantic v2 models; domain Literals built from IMPORTED core constants
+│   ├── series.py                  # normalizar_progreso (0→100 %, t0=serie[0][0]); pure Python, no numpy/UI
+│   ├── ingesta.py                 # safe multipart PDF ingest (lazy core.pipeline import, 25 MB cap→413, temp cleanup)
+│   └── routes/
+│       ├── __init__.py            # package marker
+│       ├── sesiones.py            # GET /sesiones, GET /sesiones/{id}/telemetria, POST /sesiones/ingestar
+│       ├── evaluacion.py          # POST /evaluar-admision (+ /upload), POST /comparar-delta
+│       └── advisor.py             # POST /devolucion-pedagogica
+│
 ├── database/
 │   ├── schema.sql                 # DDL v4.0 — DROP TABLE IF EXISTS + CREATE
 │   └── titan.db                   # Live SQLite DB (11 sessions at time of this revision)
@@ -124,7 +150,8 @@ Proyecto-titan.v2/
 │
 ├── tests/                         # Formal pytest suite (fixtures + assertions)
 │   ├── conftest.py                # Shared fixtures (seeded temp DB with known-score sessions)
-│   ├── test_arquitectura.py       # AST guard: core/ imports no UI toolkit; no stale duplication
+│   ├── test_arquitectura.py       # AST guard: core/ imports no UI toolkit; api/ boundaries; no stale duplication
+│   ├── test_api.py                # REST contract tests (TestClient vs temp seeded DB via dependency_overrides)
 │   ├── test_pipeline_smoke.py     # Relocated ETL smoke test (temp DB, non-mutation asserts, idempotency)
 │   ├── test_evaluador_diagnostico.py
 │   ├── test_ai_advisor.py
@@ -147,7 +174,7 @@ Proyecto-titan.v2/
 └── .gitignore                     # Excludes generated artifacts, DB, .qoder/, .venv
 ```
 
-**Modularity assessment:** After the cleanup refactor the repository root is lean: **5 entry scripts** (`main.py`, `app.py`, `streamlit_app.py`, `entrenador_ia.py`, `setup_database.py`) plus config/docs. All former ad-hoc `test_*`/`debug_*` root scripts and the legacy `analisis_mvp.py` ("Fase 3" profiles script) were **deleted**; the ETL smoke test was **relocated** into `tests/test_pipeline_smoke.py` as a formal pytest. The GUI coupling was **moved out of `core/`** into a dedicated `ui/` package, so `core/` is now a clean, headless domain layer with a single orchestration entry point (`core/pipeline.py`). There is still no `src/` layout and no `api/`/`services/` package, but the domain/service boundary is now clear enough to wrap with an HTTP layer.
+**Modularity assessment:** After the cleanup refactor the repository root is lean: **5 entry scripts** (`main.py`, `app.py`, `streamlit_app.py`, `entrenador_ia.py`, `setup_database.py`) plus config/docs. All former ad-hoc `test_*`/`debug_*` root scripts and the legacy `analisis_mvp.py` ("Fase 3" profiles script) were **deleted**; the ETL smoke test was **relocated** into `tests/test_pipeline_smoke.py` as a formal pytest. The GUI coupling was **moved out of `core/`** into a dedicated `ui/` package, so `core/` is now a clean, headless domain layer with a single orchestration entry point (`core/pipeline.py`). There is still no `src/` layout, but a dedicated **`api/` package now wraps that headless core as a FastAPI REST service** (with `routes/` sub-package), so the domain/service boundary is no longer theoretical — it is a real, tested HTTP layer.
 
 > **Do not conflate:** `entrenador_ia.py` ("Fase 5", the model trainer that regenerates `models/modelo_clasificador.joblib`) is **preserved** and is *not* the deleted "Fase 3" `analisis_mvp.py` profiles script.
 
@@ -287,7 +314,7 @@ The value written to `Sesiones.perfil_operador` depends on which path ran:
 
 ## 5. Frontend/Backend Coupling
 
-**Verdict: Now cleanly separated — domain logic lives in a UI-agnostic `core/`, the shared ETL orchestration is centralized in `core/pipeline.py`, and all GUI coupling is isolated in the `ui/` package. The remaining hotspots are configuration duplication and the desktop monolith's size.**
+**Verdict: Now cleanly separated — domain logic lives in a UI-agnostic `core/`, the shared ETL orchestration is centralized in `core/pipeline.py`, all GUI coupling is isolated in the `ui/` package, and a new `api/` package adapts the same headless core to REST (dependency direction strictly `api`/`ui` → `core`, never inward). The remaining hotspots are configuration duplication and the desktop monolith's size.**
 
 ### 5.1 What is properly decoupled ✅
 - Parsing, extraction, DB access, behavior analysis, diagnostic evaluation, and report generation are all in `core/` and are importable without a UI.
@@ -305,7 +332,41 @@ The value written to `Sesiones.perfil_operador` depends on which path ran:
 | C-6 | **`core/` opens its own DB connections** | `behavior_analyzer.py` builds `DB_PATH` and connects directly (`reporter.py` now uses `db_manager.get_db_connection`) | Hidden I/O inside "pure" logic; hard to inject a test/remote DB (partially open) |
 | C-7 | **Desktop monolith** | `app.py` remains a large CustomTkinter module mixing theme, widgets, tooltips, and orchestration calls | High change cost; preserved intentionally as a standalone tool |
 
-**Bottom line for SimuTwin:** A clean service **can** now be carved out by wrapping `core/` — the reusable pipeline (`process PDF → profile + telemetry → persist`) exists as a single headless function (`core/pipeline.py::process_simulator_pdf`) with injectable `db_path`/`models_path`/`exports_dir`/`engine` parameters. Remaining work is configuration management, persistence redesign, and the HTTP/deploy layer.
+### 5.3 The REST API layer (`api/`) — FastAPI (NEW this revision)
+
+The headless `core/` is now wrapped by a FastAPI service in the new `api/` package. The app object is **`api.main:app`** (run with `uvicorn api.main:app --reload`; interactive Swagger UI at **`/docs`**, OpenAPI schema at **`/openapi.json`**). It is a **thin adapter**: it holds no business rules, writes no SQL, and hardcodes no domain labels.
+
+**Module map**
+| File | Responsibility |
+|---|---|
+| `api/main.py` | FastAPI init + service metadata (title/description/`version=API_VERSION`) + **CORS** (`CORSMiddleware`; allow-list from env `TITAN_API_CORS_ORIGINS`, comma-separated; the wildcard `["*"]` default is **dev-only**) + **centralized exception handling**: a `@app.exception_handler(Exception)` **500** that logs only the exception type + route and returns a generic body (never leaks internals), and a `@app.exception_handler(RequestValidationError)` **422** that rebuilds each error keeping only `type`/`loc`/`msg` and a sanitized `ctx`, **stripping the raw `input`** so secrets (e.g. `api_key`) are never echoed. Also declares `GET /health`. |
+| `api/deps.py` | `get_db_path()` — the single point that resolves the SQLite path (returns `core.db_manager.DB_PATH`, read at call time); this is the **test override point** (`app.dependency_overrides[get_db_path]`). `conexion_bd_o_503(db_path)` — context manager that separates **acquisition** from **use**: only a failure to *open* the connection maps to **503** (logged with `logger.exception`); business errors raised inside the `with` body propagate to the centralized 500 handler, and deliberate `HTTPException`s (e.g. 404) pass through intact. |
+| `api/schemas.py` | Pydantic **v2** models. The **session schema** = `Session` (row metadata: operator/class/exercise/dates/scores) + `MetricasCalculadas` (the 18 physical telemetry metrics from `evaluar_diagnostico_inicial`). **Delta** schemas (`CompararDeltaRequest/Response`, `DeltaBloque`, `Deltas`, `ItemEvolucion`). `DevolucionResponse` mirrors `core.ai_advisor`'s **11-key contract**, of which **6 are the pedagogical keys** exposed to the instructor (`resumen_ejecutivo`, `puntos_fuertes`, `vicios_criticos`, `plan_accion_recomendado`, `nivel_riesgo`, `foco_prioritario`) plus meta (`provider`, `modelo`, `generado_por_llm`, `advertencias`) and the opt-in `metricas_interpretadas`. Domain `Literal` types (`DictamenLiteral`, `RiesgoLiteral`, `VeredictoLiteral`, `SentidoLiteral`, `ProveedorLiteral`) are built from **constants imported from `core`** — no hardcoded dictamen/veredicto strings. Request models are strict (`extra="forbid"` → 422 on unknown keys); response models are permissive (`extra="ignore"`). `response_model_exclude_none` is deliberately **not** set, so meaningful `*_pct=None` (percentage undefined when the base is 0) survive. |
+| `api/series.py` | `normalizar_progreso(serie)` rescales a series' time axis to **progress percentage (0→100 %)** using `t0 = serie[0][0]` and `span = serie[-1][0] - t0` — because real timestamps **can be negative** (calibration artifacts), so `t0 == 0` is never assumed; degenerate cases (<2 points, ~zero span) never raise. Plus `series_a_listas`, `normalizar_series`, `contar_puntos`. This normalization lives in **`api/` and the UI, NOT in `core/`** (core only exposes raw `Dict[signal, List[(t, v)]]`); it is pure Python (no numpy/UI). |
+| `api/ingesta.py` | Shared **safe multipart PDF ingest** used by both upload routes: **lazy import** of `core.pipeline` inside the handler (it drags cv2/pypdfium2/pytesseract/pandas/joblib and must not slow API startup), preserves `UploadFile.filename` via `os.path.basename` (the pipeline's idempotency key, and neutralizes path-traversal), `engine="parser"` (`pipeline.ENGINE_PARSER`) + `profile_source="model"`, a **25 MB cap** read in 1 MB blocks that raises **413** if exceeded, and **temp-dir cleanup in `finally`**. A `MULTIPART_DISPONIBLE` flag (checks `python_multipart`/`multipart`) gates registration of both ingest routes. |
+| `api/routes/sesiones.py`, `evaluacion.py`, `advisor.py` | The three routers (`prefix` `/api/v1/sesiones`, `/api/v1`, `/api/v1`), included by `main.py`. |
+
+**v1 endpoints**
+| Method & path | Behavior |
+|---|---|
+| `GET /health` | Service + SQLite check. Always **HTTP 200** (even with `db_disponible=False`, so orchestrator health-checks don't flap); reports `status`/`db_disponible`/`sesiones`/`version`. |
+| `GET /api/v1/sesiones` | Lists all descriptive sessions (`List[Session]`). `list_sessions` never raises → a degraded DB returns `[]`; only a connection-acquisition failure is 503. |
+| `GET /api/v1/sesiones/{session_id}/telemetria` | Telemetry series, raw (`eje_x="Tiempo (s)"`) or normalized to progress (`?normalizar=true` → `eje_x="Avance del Ejercicio (%)"`). **404** if the session does not exist (derived from `metricas_calculadas.sesion_existente`). |
+| `POST /api/v1/sesiones/ingestar` (multipart) | Processes an uploaded simulator PDF end-to-end via `core.pipeline` → `IngestarResponse` (`session_id`/`cached`/`errors`/`telemetry_loaded`). 413 over 25 MB. Registered only if `python-multipart` is present. |
+| `POST /api/v1/evaluar-admision` | Admission dictamen (Day 1) for a `session_id` → `DiagnosticoResponse` (semaforo/justificacion/foco_instructor/nivel_riesgo/hallazgos + the 18 metricas + puntaje_depurado). Raw `series` only if `incluir_series=true`. 404 if the session is missing. |
+| `POST /api/v1/evaluar-admision/upload` (multipart) | Variant that ingests an uploaded PDF and returns the **same** `DiagnosticoResponse` shape for the newly created session (422 with the pipeline `errors` if ingest yields no `session_id`). |
+| `POST /api/v1/comparar-delta` | Pre/Post comparison → deltas + technical evolution verdict (`VeredictoLiteral`) + **normalized 0→100 % series** (`series_normalizadas_pre/post` + `eje_x`). Raw `series_pre/post` only if `incluir_series=true`. **404** with `sesiones_faltantes` when either session is absent (`error` key / `VEREDICTO_SIN_DATOS`). |
+| `POST /api/v1/devolucion-pedagogica` | LLM-assisted pedagogical feedback → the **6 pedagogical keys** (+ meta). Accepts either `session_id_pre` (+ optional `session_id_post`, resolved via `obtener_payload_para_llm`) or a client-supplied `payload_metricas`. `generar_devolucion_pedagogica` never raises (degrades to a deterministic local generator, flagged via `generado_por_llm=False`/`advertencias`), so LLM failures are **not** mapped to 5xx. `api_key` is forwarded but **never logged nor returned**. `metricas_interpretadas` only if `incluir_metricas_interpretadas=true`. |
+
+**Design / architecture invariants**
+- **Dependency direction is strictly `api` → `core`** (`core/` NEVER imports `api/`, enforced by the guard `test_core_no_importa_api`).
+- **DB endpoints are SYNC `def`** handlers that open `with get_db_connection(db_path)` (via `conexion_bd_o_503`) **INSIDE** the handler body, so creation and use happen on the same thread — required because `core.db_manager.create_connection` uses `sqlite3.connect` **without** `check_same_thread=False`. Connections are never opened in an `async` dependency.
+- **HTTP status derivation:** `core/` never raises for missing data, so **404** is derived from returned flags (`metricas_calculadas.sesion_existente`, or the delta `error`/`VEREDICTO_SIN_DATOS`); **503** is emitted *only* on a connection-acquisition failure; anything else propagates to the **centralized 500** handler.
+- **Payload economy:** raw series are **opt-in** via `incluir_series`; endpoints return a plain `dict` with `response_model_exclude_unset=True` so absent raw-series keys are truly omitted, while `*_pct=None` (business-meaningful) is preserved (no global `exclude_none`).
+
+**Tests:** `tests/test_api.py` — **21 tests** exercising the real `api.main:app` with `fastapi.testclient.TestClient` against a **temp seeded SQLite file** injected via `app.dependency_overrides[get_db_path]` (the production `database/titan.db` is never touched); route enumeration uses `app.openapi()["paths"]` (not `app.routes`). `tests/test_arquitectura.py` guards were **extended to `api/`**: no UI-library imports, no raw SQL, no hardcoded dictamen/veredicto strings, and `core/` does not import `api/`. **Full suite: 161 passed / 0 failed.**
+
+**Bottom line for SimuTwin:** A clean service **has now been** carved out by wrapping `core/` — the reusable pipeline (`process PDF → profile + telemetry → persist`) exists as a single headless function (`core/pipeline.py::process_simulator_pdf`) with injectable `db_path`/`models_path`/`exports_dir`/`engine` parameters, and the FastAPI layer `api/` already exposes it (plus the diagnostic/delta/feedback endpoints) over REST with contract tests. Remaining work is configuration management (env injection for paths/thresholds), persistence redesign (PostgreSQL), and the packaging/deploy (Docker/CI) layer.
 
 ---
 
@@ -333,9 +394,10 @@ Prioritized. Severity: 🔴 Critical (blocks integration) · 🟠 High · 🟡 M
 - **Impact:** Inconsistent observability; some paths still swallow failures without structured logs.
 - **Fix:** Finish migrating the remaining modules to `logging`, use typed exceptions, and let errors bubble to a service boundary that returns proper HTTP statuses.
 
-### 🔴 E — Hardcoded configuration & magic numbers (no env injection)
-- **Where:** everywhere. `DB_PATH`/`MODELS_PATH`/`EXPORTS_DIR` computed from `__file__`; `GRAPH_CONFIGS` page numbers and pixel-calibration coordinates; `Y_RANGES`; HSV color bounds; classification thresholds (`score>=85`, `penalties<=2`, `duration<180/>600`); learning-path catalogs; `manifest.csv` column names.
-- **Impact:** Cannot configure per environment (dev/staging/prod), cannot containerize without editing source, cannot point at an external DB/model registry. **This is the single biggest microservice blocker.**
+### 🔴 E — Hardcoded configuration & magic numbers (env injection only begun)
+- **Where:** everywhere except the few env hooks noted below. `DB_PATH`/`MODELS_PATH`/`EXPORTS_DIR` computed from `__file__`; `GRAPH_CONFIGS` page numbers and pixel-calibration coordinates; `Y_RANGES`; HSV color bounds; classification thresholds (`score>=85`, `penalties<=2`, `duration<180/>600`); learning-path catalogs; `manifest.csv` column names.
+- **Progress:** env injection has *started* — `api/main.py` reads `TITAN_API_CORS_ORIGINS` for CORS, and `core/ai_advisor.py` reads `AI_API_KEY` (legacy `TITAN_LLM_API_KEY`), `AI_BASE_URL`, and `AI_MODEL`. But these cover only CORS and the LLM provider; the DB/model/exports paths and all diagnostic thresholds remain hardcoded.
+- **Impact:** Cannot fully configure per environment (dev/staging/prod), cannot containerize without editing source, cannot point at an external DB/model registry. **This remains the single biggest microservice blocker.**
 - **Fix:** Introduce a settings layer (e.g., `pydantic-settings` + `.env`), externalize all paths/thresholds, and inject the DB connection & model.
 
 ### 🟠 F — Denormalized, non-queryable telemetry storage
@@ -348,10 +410,11 @@ Prioritized. Severity: 🔴 Critical (blocks integration) · 🟠 High · 🟡 M
 - **Impact:** Largely mitigated — a normal run is side-effect-free w.r.t. debug images, and generated artifacts/DB are no longer version-controlled. Residual: `models/` is still committed and the debug flag is a module constant, not an env var.
 - **Fix:** Drive the debug flag from configuration/env; keep artifacts out of the image; write debug output to a temp/volume dir when enabled.
 
-### 🔴 H — No service, packaging, or deployment layer
-- **Where:** repo-wide. No API framework, no `Dockerfile`, no CI, no `pyproject.toml`, no dependency grouping, undocumented **Tesseract** OS dependency, no `python_requires`.
-- **Impact:** Nothing to deploy. Integration into SimuTwin requires standing up an HTTP surface (e.g., FastAPI), containerizing (incl. Tesseract + OpenCV system libs), and adding health checks — none exist today.
-- **Fix:** Add FastAPI wrapper around the consolidated `core` pipeline; multi-stage Dockerfile with `tesseract-ocr` + `libgl` (OpenCV); split direct vs transitive deps; add CI.
+### 🟠 H — Service layer ✅ DONE; packaging & deployment still absent
+- **Where:** repo-wide. The **HTTP surface is now built** (FastAPI package `api/`, `api.main:app`, with a `GET /health` check — see §5.3). Still missing: no `Dockerfile`, no CI, no `pyproject.toml`, no dependency grouping, undocumented **Tesseract** OS dependency, no `python_requires`.
+- **~~Add FastAPI wrapper around the consolidated `core` pipeline~~ → ✅ RESOLVED:** `api/` now wraps `core/pipeline.py::process_simulator_pdf` (safe multipart ingest, `engine="parser"`) plus the diagnostic/delta/pedagogical-feedback endpoints, with Pydantic v2 schemas, CORS, centralized error handling, and 21 contract tests (`tests/test_api.py`).
+- **Impact:** There is now a runnable service (`uvicorn api.main:app`), but nothing to *deploy*: integration into SimuTwin still requires containerizing (incl. Tesseract + OpenCV system libs) and CI wiring.
+- **Fix (remaining):** multi-stage Dockerfile with `tesseract-ocr` + `libgl` (OpenCV); split direct vs transitive deps; add CI; drive config from env (see §6-E).
 
 ### 🟠 I — Degenerate ML model / fragile feature contract
 - **Where:** `entrenador_ia.py` (training, "Fase 5") + `_preparar_datos_para_prediccion` (now a **single unified copy** in `core/pipeline.py`). The live DB previously showed all sessions predicted `Ineficiente`; the current snapshot (11 sessions) contains **both `Eficiente` and `Ineficiente`**, so the collapse is no longer total but the training set remains tiny/imbalanced.
@@ -377,17 +440,17 @@ Prioritized. Severity: 🔴 Critical (blocks integration) · 🟠 High · 🟡 M
 
 ## 7. Microservice Readiness Notes for SimuTwin
 
-**Suggested extraction boundary (target):** a headless `core` service. The primary entry point **already exists** as `core/pipeline.py::process_simulator_pdf(pdf_path, profile_source, *, db_path, models_path, exports_dir, engine, perfil_override) -> {session_id, metadata, telemetry_loaded, profile, errors, cached}`, with injectable paths/engine — it just needs an HTTP wrapper. Alongside it:
+**Suggested extraction boundary (target):** a headless `core` service. The primary entry point **already exists** as `core/pipeline.py::process_simulator_pdf(pdf_path, profile_source, *, db_path, models_path, exports_dir, engine, perfil_override) -> {session_id, metadata, telemetry_loaded, profile, errors, cached}`, with injectable paths/engine — and it is **now wrapped by a real FastAPI HTTP layer** (`api/`, `api.main:app`; see §5.3). Alongside it:
 ```
 process_simulator_pdf(pdf_path, profile_source="model"|"none", engine="visual"|"parser") -> {session_id, metadata, telemetry, profile}   # EXISTS in core/pipeline.py
 analyze_session(session_id) -> behavior metrics                 # core/behavior_analyzer.analizar_comportamiento_completo
 evaluate_diagnostic(session_id[, post]) -> dictamen / delta      # core/evaluador_diagnostico
 ```
-wrapped by a FastAPI app, backed by PostgreSQL (redesigned telemetry table), configured via env vars, containerized with Tesseract + OpenCV system libs.
+wrapped by a FastAPI app (**already implemented in `api/`**), backed by PostgreSQL (redesigned telemetry table), configured via env vars, containerized with Tesseract + OpenCV system libs.
 
-**What can be reused largely as-is:** `core/pipeline.py` (the consolidated orchestration), `pdf_parser`, `telemetry_extractor` (mapper contract fixed, debug I/O now gated), `behavior_analyzer` metric functions, `evaluador_diagnostico`, `ai_advisor` (LLM-ready), `reporter`/`report_generator`, and the trained-model loading pattern. `core/` is already UI-agnostic and REST-ready.
+**What can be reused largely as-is:** `core/pipeline.py` (the consolidated orchestration), `pdf_parser`, `telemetry_extractor` (mapper contract fixed, debug I/O now gated), `behavior_analyzer` metric functions, `evaluador_diagnostico`, `ai_advisor` (LLM-ready), `reporter`/`report_generator`, and the trained-model loading pattern. `core/` is already UI-agnostic and is **now served as REST** through `api/`.
 
-**What must still be built before integration:** the HTTP/service layer, configuration management (env injection), persistence model & concurrency (PostgreSQL), full observability, packaging/deployment (Docker incl. Tesseract + OpenCV), and ML dataset curation/validation.
+**What must still be built before integration:** configuration management (env injection for paths/thresholds), persistence model & concurrency (PostgreSQL), full observability, packaging/deployment (Docker incl. Tesseract + OpenCV, CI), and ML dataset curation/validation. The HTTP/service layer itself **now exists** (`api/`) and is contract-tested.
 
 **Already deleted / resolved in this refactor:** `core/training_manager.py` + `core/training_path.py` (removed as orphaned/broken), the duplicated frontend orchestration (consolidated into `core/pipeline.py`), `core/plotter.py`'s GUI coupling (migrated to `ui/plotter.py`), the root-level `test_*`/`debug_*`/`analisis_mvp.py` scripts (deleted), the `PyMuPDF` dependency (dropped), and committed `debug_outputs/` (now git-ignored). The duplicate `telemetry_parser.py` engine is **retained** but is now selectable via one `engine=` parameter rather than diverging per frontend.
 
